@@ -1,0 +1,15 @@
+{
+  "name": "nexxus-crm-server",
+  "version": "1.0.0",
+  "description": "Nexxus CRM - Revenda B2B de Softwares (backend Node puro + persistencia em arquivo JSON, zero dependencias)",
+  "type": "commonjs",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js",
+    "seed": "node lib/seed.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

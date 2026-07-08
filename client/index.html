@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Nexxus CRM · A Máquina de Vendas B2B</title>
+  <link rel="icon" href="assets/favicon.svg" type="image/svg+xml" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="css/tokens.css" />
+  <link rel="stylesheet" href="css/app.css" />
+</head>
+<body>
+  <div id="app"></div>
+  <div id="boot-error" style="display:none;position:fixed;inset:0;background:#FBFBFD;color:#1D1D1F;font-family:Inter,-apple-system,sans-serif;align-items:center;justify-content:center;text-align:center;padding:24px;">
+    <div style="max-width:440px">
+      <div style="font-size:24px;font-weight:700;letter-spacing:-.02em">Nexxus<span style="color:#0071E3">CRM</span></div>
+      <p style="color:#424245;line-height:1.65;margin-top:14px">Não foi possível carregar a biblioteca Vue pela internet (CDN).<br/>Confira sua conexão e recarregue a página.</p>
+      <p style="color:#86868B;font-size:13px">O servidor local está funcionando — apenas o Vue é baixado de um CDN.</p>
+    </div>
+  </div>
+
+  <script src="js/template.js"></script>
+  <script src="js/api.js"></script>
+  <!-- Vue 3 via CDN primário; fallback automático para um segundo CDN -->
+  <script src="https://unpkg.com/vue@3.5.13/dist/vue.global.prod.js"></script>
+  <script>
+    (function () {
+      var CDN2 = 'https://cdn.jsdelivr.net/npm/vue@3.5.13/dist/vue.global.prod.js';
+      var triedFallback = false, waited = 0;
+      function start() {
+        if (window.__appStarted) return; window.__appStarted = true;
+        var s = document.createElement('script'); s.src = 'js/app.js'; document.body.appendChild(s);
+      }
+      function tick() {
+        if (window.Vue) return start();
+        waited += 100;
+        if (!triedFallback && waited >= 200) {
+          triedFallback = true;
+          var f = document.createElement('script'); f.src = CDN2;
+          f.onload = tick;
+          f.onerror = function(){ document.getElementById('boot-error').style.display = 'flex'; };
+          document.head.appendChild(f);
+        }
+        if (waited > 8000) { if (!window.Vue) document.getElementById('boot-error').style.display = 'flex'; return; }
+        setTimeout(tick, 100);
+      }
+      tick();
+    })();
+  </script>
+</body>
+</html>

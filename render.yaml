@@ -1,0 +1,21 @@
+services:
+  - type: web
+    name: nexxus-crm
+    runtime: node
+    plan: starter          # use 'free' para testar; 'starter' mantém sempre ligado
+    rootDir: server
+    buildCommand: ""       # sem build: zero dependências
+    startCommand: node server.js
+    healthCheckPath: /healthz
+    autoDeploy: true
+    envVars:
+      - key: NODE_VERSION
+        value: "20"
+      - key: JWT_SECRET
+        generateValue: true       # segredo forte gerado automaticamente
+      - key: DB_FILE
+        value: /var/data/nexxus.json
+    disk:
+      name: nexxus-data
+      mountPath: /var/data        # dados persistem entre deploys
+      sizeGB: 1

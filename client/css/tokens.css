@@ -1,0 +1,50 @@
+/* ==========================================================================
+   tokens.css — Identidade visual Nexxus (extraída do repositório oficial
+   nexxustech: design premium "inspirado na Apple").
+   Fonte dos valores: client/src/index.css do site nexxustech.
+   ========================================================================== */
+:root {
+  /* Marca — azul Apple */
+  --nx-primary: #0071E3;        /* Apple blue (CTA) */
+  --nx-primary-600: #0077ED;    /* hover */
+  --nx-primary-700: #0058B8;
+  --nx-accent: #0A84FF;
+  --nx-gold: #86868B;
+  --nx-gradient: linear-gradient(135deg, #0071E3 0%, #0A84FF 100%);
+
+  /* Superfícies — branco elegante Apple */
+  --nx-bg: #FBFBFD;
+  --nx-surface: #FFFFFF;
+  --nx-surface-2: #F5F5F7;
+  --nx-sidebar: #FFFFFF;
+  --nx-sidebar-2: #F5F5F7;
+  --nx-sidebar-text: #1D1D1F;
+
+  /* Texto — escala de cinzas Apple */
+  --nx-text: #1D1D1F;
+  --nx-text-soft: #424245;
+  --nx-text-mute: #86868B;
+  --nx-border: #E8E8ED;
+
+  /* Semânticos — paleta iOS/macOS */
+  --nx-success: #34C759;
+  --nx-danger: #FF3B30;
+  --nx-warning: #FF9500;
+  --nx-info: #0071E3;
+  --nx-hot: #FF2D55;
+
+  /* Estágios do funil */
+  --st-novo_lead: #86868B;
+  --st-triagem: #5E5CE6;
+  --st-aguardando_cotacao: #FF9500;
+  --st-precificacao: #0071E3;
+  --st-proposta_enviada: #0A84FF;
+  --st-negociacao: #FF2D55;
+
+  /* Forma — cantos arredondados + sombras suaves (Apple) */
+  --nx-radius: 20px;
+  --nx-radius-sm: 12px;
+  --nx-shadow: 0 2px 8px rgba(0,0,0,.04), 0 4px 12px rgba(0,0,0,.06);
+  --nx-shadow-lg: 0 20px 60px rgba(0,0,0,.15);
+  --nx-font: 'Inter', -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', Roboto, sans-serif;
+}

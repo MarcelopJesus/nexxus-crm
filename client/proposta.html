@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Proposta · NexxusCRM</title>
+  <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml" />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/css/tokens.css" />
+  <style>
+    body{ margin:0; background:var(--nx-bg); font-family:var(--nx-font); color:var(--nx-text); }
+    .wrap{ max-width:640px; margin:0 auto; padding:40px 20px; }
+    .brand{ font-size:22px; font-weight:700; letter-spacing:-.02em; }
+    .brand span{ color:var(--nx-primary); }
+    .card{ background:#fff; border:1px solid var(--nx-border); border-radius:20px; box-shadow:0 2px 8px rgba(0,0,0,.04),0 10px 30px rgba(0,0,0,.06); padding:32px; margin-top:22px; }
+    .muted{ color:var(--nx-text-mute); } .soft{ color:var(--nx-text-soft); }
+    .price{ font-size:40px; font-weight:800; letter-spacing:-.02em; color:var(--nx-primary); margin:6px 0; }
+    .row{ display:flex; justify-content:space-between; padding:11px 0; border-bottom:1px solid var(--nx-border); font-size:14px; }
+    .btn{ display:inline-flex; align-items:center; justify-content:center; padding:13px 24px; border:none; border-radius:980px; background:var(--nx-primary); color:#fff; font-weight:600; font-size:15px; cursor:pointer; }
+    .btn:hover{ background:var(--nx-primary-600); }
+    .pill{ font-size:12px; font-weight:700; padding:4px 12px; border-radius:980px; }
+    .ok{ background:#e7f7ec; color:#1a7f37; } .info{ background:#eaf3ff; color:#0058B8; }
+    .center{ text-align:center; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="brand">Nexxus<span>CRM</span></div>
+    <div id="content" class="card"><p class="muted">Carregando proposta…</p></div>
+    <p class="center muted" style="font-size:12px;margin-top:20px">Proposta gerada pelo NexxusCRM · NexxusTECH</p>
+  </div>
+  <script>
+    var token = location.pathname.split('/p/')[1] || '';
+    var el = document.getElementById('content');
+    function brl(n){ return 'R$ ' + Number(n||0).toLocaleString('pt-BR',{minimumFractionDigits:2,maximumFractionDigits:2}); }
+    function statusPill(s){ if(s==='accepted') return '<span class="pill ok">Aceita</span>'; if(s==='viewed') return '<span class="pill info">Visualizada</span>'; return '<span class="pill info">Enviada</span>'; }
+    fetch('/api/public/proposals/' + token).then(function(r){ return r.json(); }).then(function(res){
+      if(!res.success){ el.innerHTML='<p class="muted">Proposta não encontrada ou expirada.</p>'; return; }
+      var d = res.data;
+      var accepted = d.status==='accepted';
+      el.innerHTML =
+        '<div style="display:flex;justify-content:space-between;align-items:center"><h2 style="margin:0">Proposta comercial</h2>'+statusPill(d.status)+'</div>'+
+        '<p class="soft">Preparada para <b>'+(d.company||'sua empresa')+'</b>'+(d.contact?(' · a/c '+d.contact):'')+'</p>'+
+        '<div class="row"><span class="muted">Solução</span><b>'+(d.software||'Solução de software')+'</b></div>'+
+        '<div class="row"><span class="muted">Versão da proposta</span><span>v'+d.version+'</span></div>'+
+        '<div class="row"><span class="muted">Responsável comercial</span><span>'+(d.seller||'—')+'</span></div>'+
+        '<p class="muted" style="margin:22px 0 0">Investimento total</p><div class="price">'+brl(d.final_price)+'</div>'+
+        (accepted
+          ? '<p class="pill ok" style="display:inline-block;margin-top:10px">✓ Proposta aceita em '+(d.accepted_at||'')+'</p>'
+          : '<div style="margin-top:22px"><button class="btn" id="acc">Aceitar proposta</button></div>');
+      var b=document.getElementById('acc');
+      if(b) b.onclick=function(){ b.disabled=true; b.textContent='Enviando…';
+        fetch('/api/public/proposals/'+token+'/accept',{method:'POST'}).then(function(r){return r.json();}).then(function(){
+          el.querySelector('.price').insertAdjacentHTML('afterend','<p class="pill ok" style="display:inline-block;margin-top:14px">✓ Proposta aceita! Nossa equipe entrará em contato.</p>');
+          b.remove();
+        }); };
+    }).catch(function(){ el.innerHTML='<p class="muted">Erro ao carregar a proposta.</p>'; });
+  </script>
+</body>
+</html>
