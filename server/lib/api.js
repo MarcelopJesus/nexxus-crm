@@ -78,6 +78,18 @@ async function handle(req) {
     const phone = body.phone || cf.telefone || null;
     const message = body.message || body.summary || cf.mensagem || null;
     const protocol = body.protocol || cf.protocolo || null;
+    if (protocol) {
+      const protocolMarker = `Protocolo site: ${protocol}`;
+      const existingLead = S.findOne('leads', lead => String(lead.notes || '').includes(protocolMarker));
+      if (existingLead) {
+        return { status:200, body:{ success:true, data:{
+          id:existingLead.id,
+          owner_id:existingLead.owner_id,
+          kind,
+          deduplicated:true,
+        } } };
+      }
+    }
     let valueNum = 0;
     if (body.value != null && !isNaN(parseFloat(body.value))) valueNum = parseFloat(body.value);
     else if (cf.valor) valueNum = parseFloat(String(cf.valor).replace(/[^0-9.,]/g,'').replace(/\.(?=\d{3})/g,'').replace(',','.')) || 0;
