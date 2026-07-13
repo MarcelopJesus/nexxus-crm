@@ -14,7 +14,9 @@ Body (JSON): { companyName, contactName, email, phone, employees, message, proto
 ```
 
 Os campos são exatamente os da tabela `b2bLeads` do site. O CRM cria a empresa, o contato
-e o lead, distribui para um vendedor (round-robin) e gera uma notificação interna.
+e o lead, distribui para um vendedor (round-robin) e gera uma notificação interna. O campo
+`protocol` funciona como chave de idempotência: se o site reenviar o mesmo protocolo após uma
+falha ou timeout, o CRM devolve o lead existente em vez de criar uma duplicata.
 
 ## O que adicionar no backend do site (repo NexxusTECH)
 
