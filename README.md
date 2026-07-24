@@ -151,3 +151,43 @@ Gestão de usuários e permissões por área/papel · funil de vendas Kanban com
 - **Notificações internas** — sino no topo com contador: avisa lead novo, proposta vista, proposta aceita, cotação recebida e negócio ganho. Clique na notificação para abrir o lead.
 - **Follow-up** — cadência automática D+3/7/15 ao enviar proposta; a tela *Tarefas* destaca **atrasadas** (vermelho) e **para hoje**, com contadores.
 - **Origem dos negócios (dashboard)** — painel com leads, ganhos, conversão e **faturamento por canal** (site, checkout, newsletter, indicação, outbound) para acompanhar o retorno de cada fonte.
+
+---
+
+## 9. SDR Agent — Prospecção Inteligente com IA
+
+Módulo de pré-vendas com IA que cobre as três etapas do trabalho de um SDR, integrado nativamente ao funil. Acesse pelo menu **⚡ SDR Agent** (tela de prospecção) e pela aba **⚡ SDR** dentro do drawer de qualquer lead.
+
+| Função | O que faz | Onde fica |
+|---|---|---|
+| **1. Pesquisa de leads** | A partir do ICP (segmento, porte, região, software de interesse), o agente gera uma lista de empresas-alvo do mercado brasileiro com decisor sugerido, software do catálogo mais aderente, justificativa de fit e **fit score 0-100**. Cada prospect pode ser **importado para o funil com 1 clique** (cria conta + contato + lead em *Novo Lead*, origem `outbound`) ou descartado. | Tela **SDR Agent** |
+| **2. Preparação de abordagem** | Gera um kit completo e personalizado por lead: **e-mail de cold outreach** (assunto + corpo), **mensagem de WhatsApp**, **mensagem de LinkedIn**, **roteiro de ligação** com pontos-chave e **3 objeções prováveis com respostas prontas**. Tudo com botão de copiar. | Drawer do lead → aba **⚡ SDR** |
+| **3. Qualificação de contas (BANT)** | Analisa dados do lead + timeline e pontua **Budget, Authority, Need e Timing** (0-25 cada, total 0-100) com justificativa por dimensão, resumo executivo, **Tier A/B/C**, informações a levantar e **próximas ações que viram tarefas automaticamente**. Tier A marca o lead como 🔥 quente. O score aparece como badge nos cards do funil. | Drawer do lead → aba **⚡ SDR** |
+
+### Configuração
+
+O SDR Agent usa qualquer API compatível com OpenAI (Chat Completions). Defina no ambiente do servidor:
+
+```bash
+export OPENAI_API_KEY="sk-..."            # obrigatória — sem ela o módulo fica desativado com aviso na UI
+export OPENAI_API_BASE="https://api.openai.com/v1"  # opcional (default OpenAI)
+export SDR_MODEL="gpt-5-mini"             # opcional (default gpt-5-mini)
+```
+
+Sem chave configurada, o CRM continua funcionando normalmente — os botões do SDR Agent ficam desabilitados com um aviso de configuração.
+
+### Rotas da API
+
+| Método | Rota | Descrição |
+|---|---|---|
+| GET | `/api/sdr/status` | Status da IA (configurada? qual modelo?) |
+| POST | `/api/sdr/research` | Pesquisa leads a partir do ICP `{segment, size, region, software, notes, quantity}` |
+| GET | `/api/sdr/prospects` | Lista prospects pesquisados |
+| POST | `/api/sdr/prospects/:id/import` | Importa prospect para o funil (conta + contato + lead) |
+| DELETE | `/api/sdr/prospects/:id` | Descarta prospect |
+| POST | `/api/sdr/leads/:id/outreach` | Gera kit de abordagem para o lead |
+| POST | `/api/sdr/leads/:id/qualify` | Qualifica a conta (BANT) e cria tarefas |
+
+Implementação em `server/lib/sdr.js` (zero dependências, `node:https` nativo), rotas em `server/lib/api.js`, novas coleções `prospects`, `outreaches` e `qualifications` em `server/lib/store.js`.
+
+> **Nota sobre a pesquisa de leads:** os prospects são gerados pelo modelo de IA com base em conhecimento do mercado brasileiro — são pontos de partida realistas, mas **valide empresa e decisor no LinkedIn** antes do outreach (a própria UI e as tarefas geradas reforçam isso).

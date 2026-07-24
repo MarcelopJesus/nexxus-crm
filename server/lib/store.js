@@ -9,7 +9,8 @@ if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
 const DB_FILE = process.env.DB_FILE || path.join(DATA_DIR, 'nexxus.json');
 
 const COLLECTIONS = ['users','accounts','contacts','suppliers','products','leads',
-  'quotes','pricings','proposals','tasks','contracts','activities','notifications'];
+  'quotes','pricings','proposals','tasks','contracts','activities','notifications',
+  'prospects','outreaches','qualifications'];
 
 let data = { seq: {}, config: null };
 COLLECTIONS.forEach(c => data[c] = []);

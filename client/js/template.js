@@ -38,6 +38,7 @@ function APP_TEMPLATE() { return `
     <div class="nav-item" :class="{active: route==='/'||route==='/dashboard'}" @click="go('/')"><span class="ic">▚</span> Dashboard</div>
     <div class="nav-item" :class="{active: route==='/funil'}" @click="go('/funil')"><span class="ic">▤</span> Funil de Vendas</div>
     <div class="nav-item" :class="{active: route==='/tarefas'}" @click="go('/tarefas'); loadTasks()"><span class="ic">✓</span> Tarefas & Follow-up</div>
+    <div class="nav-item" :class="{active: route==='/sdr'}" @click="go('/sdr'); loadProspects()"><span class="ic">⚡</span> SDR Agent</div>
     <div class="nav-group">Administração</div>
     <div class="nav-item" :class="{active: route==='/config'}" @click="go('/config')"><span class="ic">⚙</span> Catálogo & Regras</div>
     <div class="nav-item" :class="{active: route==='/usuarios'}" @click="go('/usuarios'); loadUsers()"><span class="ic">◔</span> Usuários</div>
@@ -51,6 +52,7 @@ function APP_TEMPLATE() { return `
         <template v-if="route==='/'||route==='/dashboard'">Dashboard</template>
         <template v-else-if="route==='/funil'">Funil de Vendas</template>
         <template v-else-if="route==='/tarefas'">Tarefas & Follow-up</template>
+        <template v-else-if="route==='/sdr'">SDR Agent — Prospecção Inteligente</template>
         <template v-else-if="route==='/config'">Catálogo & Regras de Precificação</template>
         <template v-else-if="route==='/usuarios'">Usuários & Permissões</template>
       </h1>
@@ -146,6 +148,7 @@ function APP_TEMPLATE() { return `
             <div v-for="l in (leadsByStage[s.key]||[])" :key="l.id" class="lead-card" draggable="true"
                  @dragstart="onDragStart(l)" @click="openLead(l.id)">
               <div class="lc-title">{{ l.title }} <span v-if="l.hot" class="hot-flag">🔥</span></div>
+              <div v-if="l.bant_score!=null" class="small" style="margin:2px 0"><span class="badge" :style="{background: tierColor(l.bant_tier), color:'#fff', fontSize:'10px'}">BANT {{ l.bant_score }} · {{ l.bant_tier }}</span></div>
               <div class="lc-acc">{{ l.account_name || '—' }}</div>
               <div class="lc-meta">
                 <span class="chip">{{ l.requested_software || l.product_name || 'Software' }}</span>
@@ -179,6 +182,60 @@ function APP_TEMPLATE() { return `
             </tr>
             <tr v-if="!S.tasks.length"><td colspan="7" class="muted" style="padding:20px">Nenhuma tarefa.</td></tr>
           </tbody></table>
+        </div>
+      </div>
+
+      <!-- ===== SDR AGENT ===== -->
+      <div v-else-if="route==='/sdr'">
+        <div v-if="!S.sdr.configured" class="card card-p mb" style="border-color:#f0c36d;background:#fff8e6">
+          <b>IA não configurada.</b> <span class="small">Defina a variável de ambiente <code>OPENAI_API_KEY</code> (e opcionalmente <code>OPENAI_API_BASE</code> e <code>SDR_MODEL</code>) no servidor para ativar o SDR Agent.</span>
+        </div>
+        <div class="card card-p mb">
+          <div class="flex between center">
+            <div class="section-title" style="margin:0">1 · Pesquisa de Leads — defina o ICP (perfil de cliente ideal)</div>
+            <span class="chip" v-if="S.sdr.model">modelo: {{ S.sdr.model }}</span>
+          </div>
+          <p class="small muted">O agente pesquisa empresas-alvo aderentes ao perfil, sugere o decisor e o software do catálogo mais indicado. Valide os contatos no LinkedIn antes de abordar.</p>
+          <div class="row3">
+            <div class="field"><label>Segmento / indústria</label><input v-model="S.icp.segment" placeholder="Ex.: Construção civil, Fintech, Agências"/></div>
+            <div class="field"><label>Porte (funcionários)</label><select v-model="S.icp.size"><option value="">Qualquer</option><option>1-50</option><option>51-200</option><option>201-1000</option><option>1000+</option></select></div>
+            <div class="field"><label>Região / cidade</label><input v-model="S.icp.region" placeholder="Ex.: São Paulo, Sul, Brasil"/></div>
+          </div>
+          <div class="row3">
+            <div class="field"><label>Software / categoria de interesse</label><select v-model="S.icp.software"><option value="">Qualquer do catálogo</option><option v-for="p in S.products" :value="p.name">{{ p.name }}</option></select></div>
+            <div class="field"><label>Quantidade de empresas</label><select v-model.number="S.icp.quantity"><option :value="5">5</option><option :value="8">8</option><option :value="10">10</option><option :value="15">15</option></select></div>
+            <div class="field"><label>Observações</label><input v-model="S.icp.notes" placeholder="Ex.: empresas em expansão, com time de devs"/></div>
+          </div>
+          <button class="btn" @click="runResearch" :disabled="S.researching || !S.sdr.configured">{{ S.researching ? 'Pesquisando… (pode levar ~30s)' : '⚡ Pesquisar leads' }}</button>
+        </div>
+        <div class="card mb">
+          <div class="card-p" style="padding-bottom:0"><div class="section-title">Empresas-alvo encontradas <span class="count" style="margin-left:6px">{{ S.prospects.filter(p=>p.status!=='imported').length }}</span></div></div>
+          <table class="tbl">
+            <thead><tr><th>Fit</th><th>Empresa</th><th>Segmento · Cidade</th><th>Porte</th><th>Decisor sugerido</th><th>Software</th><th>Por que é fit</th><th style="width:170px"></th></tr></thead>
+            <tbody>
+              <tr v-for="p in S.prospects" :key="p.id" :style="{opacity: p.status==='imported'?0.55:1}">
+                <td><b :style="{color: fitColor(p.fit_score)}">{{ p.fit_score }}</b></td>
+                <td><b>{{ p.company_name }}</b><div class="muted" style="font-size:11px">{{ p.website }}</div></td>
+                <td class="small">{{ p.segment }} · {{ p.city }}</td>
+                <td class="small">{{ p.size_estimate }}</td>
+                <td class="small">{{ p.contact_name }}<div class="muted" style="font-size:11px">{{ p.contact_role }}</div></td>
+                <td class="small">{{ p.suggested_software }}</td>
+                <td class="small muted" style="max-width:260px">{{ p.why_fit }}</td>
+                <td>
+                  <div class="flex gap" v-if="p.status!=='imported'">
+                    <button class="btn btn-sm" @click="importProspect(p)" :disabled="S.importingId===p.id">{{ S.importingId===p.id?'Importando…':'➕ Funil' }}</button>
+                    <button class="btn btn-ghost btn-sm" @click="discardProspect(p)">Descartar</button>
+                  </div>
+                  <span v-else class="badge won">No funil</span>
+                </td>
+              </tr>
+              <tr v-if="!S.prospects.length"><td colspan="8" class="muted" style="padding:20px">Nenhum prospect ainda. Preencha o ICP acima e clique em “Pesquisar leads”.</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="card card-p">
+          <div class="section-title">2 · Abordagem &amp; 3 · Qualificação</div>
+          <p class="small muted">Após importar um prospect (ou em qualquer lead do funil), abra o card e use a aba <b>⚡ SDR</b> para gerar o kit de abordagem personalizado (e-mail, WhatsApp, LinkedIn, roteiro de ligação) e o score de qualificação <b>BANT</b> (0-100, Tier A/B/C) com próximos passos automáticos.</p>
         </div>
       </div>
 
@@ -272,6 +329,7 @@ function DRAWER_TEMPLATE() { return `
             <span v-if="S.drawer.lead.status==='won'" class="badge won">GANHO</span>
             <span v-if="S.drawer.lead.status==='lost'" class="badge lost">PERDIDO</span>
             <span v-if="S.drawer.lead.hot" class="hot-flag">🔥 Quente</span>
+            <span v-if="S.drawer.lead.bant_score!=null" class="badge" :style="{background: tierColor(S.drawer.lead.bant_tier), color:'#fff'}">BANT {{ S.drawer.lead.bant_score }}/100 · Tier {{ S.drawer.lead.bant_tier }}</span>
           </div>
           <h2 style="margin:8px 0 2px">{{ S.drawer.lead.title }}</h2>
           <div class="muted small">{{ S.drawer.lead.account_name }} · {{ S.drawer.lead.contact_name }} · {{ S.drawer.lead.contact_email }}</div>
@@ -280,6 +338,7 @@ function DRAWER_TEMPLATE() { return `
       </div>
       <div class="tabs mt">
         <div class="tab" :class="{active:S.drawerTab==='resumo'}" @click="S.drawerTab='resumo'">Resumo</div>
+        <div class="tab" :class="{active:S.drawerTab==='sdr'}" @click="S.drawerTab='sdr'">⚡ SDR</div>
         <div class="tab" :class="{active:S.drawerTab==='cotacao'}" @click="S.drawerTab='cotacao'">Cotação</div>
         <div class="tab" :class="{active:S.drawerTab==='precificacao'}" @click="S.drawerTab='precificacao'">Precificação</div>
         <div class="tab" :class="{active:S.drawerTab==='proposta'}" @click="S.drawerTab='proposta'">Proposta</div>
@@ -312,6 +371,90 @@ function DRAWER_TEMPLATE() { return `
             <textarea v-model="S.noteInput" rows="4" placeholder="Registrar contato, observação…" style="width:100%;padding:10px;border:1px solid var(--nx-border);border-radius:8px"></textarea>
             <button class="btn btn-sm mt" @click="addNote">Adicionar à timeline</button>
           </div>
+        </div>
+      </div>
+
+      <!-- SDR AGENT (abordagem + qualificação BANT) -->
+      <div v-if="S.drawerTab==='sdr'">
+        <div v-if="!S.sdr.configured" class="card card-p mb" style="border-color:#f0c36d;background:#fff8e6">
+          <b>IA não configurada.</b> <span class="small">Defina <code>OPENAI_API_KEY</code> no servidor para ativar o SDR Agent.</span>
+        </div>
+
+        <!-- Qualificação BANT -->
+        <div class="card card-p mb">
+          <div class="flex between center">
+            <div class="section-title" style="margin:0">Qualificação da conta (BANT)</div>
+            <button class="btn btn-sm" @click="runQualify" :disabled="S.genQualify || !S.sdr.configured">{{ S.genQualify ? 'Qualificando…' : (S.drawer.qualifications && S.drawer.qualifications.length ? '↻ Requalificar' : '⚡ Qualificar conta') }}</button>
+          </div>
+          <div v-if="S.drawer.qualifications && S.drawer.qualifications.length" class="mt">
+            <div class="flex center gap mb">
+              <div style="font-size:34px;font-weight:800" :style="{color: tierColor(S.drawer.qualifications[0].tier)}">{{ S.drawer.qualifications[0].total_score }}<span class="muted" style="font-size:15px;font-weight:600">/100</span></div>
+              <span class="badge" :style="{background: tierColor(S.drawer.qualifications[0].tier), color:'#fff'}">Tier {{ S.drawer.qualifications[0].tier }}</span>
+              <span class="small muted">{{ S.drawer.qualifications[0].created_at }}</span>
+            </div>
+            <p class="small" style="margin-top:0">{{ S.drawer.qualifications[0].summary }}</p>
+            <div class="row2">
+              <div v-for="(dim,key) in {budget:'Budget (orçamento)', authority:'Authority (decisor)', need:'Need (necessidade)', timing:'Timing (momento)'}" :key="key" class="mb">
+                <div class="flex between small" style="margin-bottom:4px"><b>{{ dim }}</b><span class="mono">{{ S.drawer.qualifications[0][key].score }}/25</span></div>
+                <div class="bar"><span :style="{width: (S.drawer.qualifications[0][key].score/25*100)+'%'}"></span></div>
+                <div class="small muted" style="margin-top:3px">{{ S.drawer.qualifications[0][key].rationale }}</div>
+              </div>
+            </div>
+            <div class="row2 mt">
+              <div>
+                <div class="section-title" style="font-size:13px">Próximas ações (viram tarefas)</div>
+                <ul class="small" style="margin:0;padding-left:18px"><li v-for="na in S.drawer.qualifications[0].next_actions">{{ na }}</li></ul>
+              </div>
+              <div v-if="S.drawer.qualifications[0].missing_info && S.drawer.qualifications[0].missing_info.length">
+                <div class="section-title" style="font-size:13px">Informações a levantar</div>
+                <ul class="small" style="margin:0;padding-left:18px"><li v-for="mi in S.drawer.qualifications[0].missing_info">{{ mi }}</li></ul>
+              </div>
+            </div>
+          </div>
+          <p v-else class="small muted mt">Sem qualificação ainda. O agente analisa dados do lead + timeline e gera o score BANT com próximos passos (Tier A marca o lead como 🔥 quente e cria tarefas automáticas).</p>
+        </div>
+
+        <!-- Kit de abordagem -->
+        <div class="card card-p">
+          <div class="flex between center">
+            <div class="section-title" style="margin:0">Kit de abordagem personalizado</div>
+            <button class="btn btn-sm" @click="generateOutreach" :disabled="S.genOutreach || !S.sdr.configured">{{ S.genOutreach ? 'Gerando…' : (S.drawer.outreaches && S.drawer.outreaches.length ? '↻ Regerar' : '⚡ Gerar abordagem') }}</button>
+          </div>
+          <div v-if="S.drawer.outreaches && S.drawer.outreaches.length" class="mt">
+            <div class="tabs mb">
+              <div class="tab" :class="{active:S.outreachTab==='email'}" @click="S.outreachTab='email'">E-mail</div>
+              <div class="tab" :class="{active:S.outreachTab==='whatsapp'}" @click="S.outreachTab='whatsapp'">WhatsApp</div>
+              <div class="tab" :class="{active:S.outreachTab==='linkedin'}" @click="S.outreachTab='linkedin'">LinkedIn</div>
+              <div class="tab" :class="{active:S.outreachTab==='call'}" @click="S.outreachTab='call'">Ligação</div>
+              <div class="tab" :class="{active:S.outreachTab==='objecoes'}" @click="S.outreachTab='objecoes'">Objeções</div>
+            </div>
+            <div v-if="S.outreachTab==='email'">
+              <p class="small"><b>Assunto:</b> {{ S.drawer.outreaches[0].email_subject }}</p>
+              <pre class="small" style="white-space:pre-wrap;background:var(--nx-bg, #f5f5f7);padding:12px;border-radius:10px;font-family:inherit">{{ S.drawer.outreaches[0].email_body }}</pre>
+              <button class="btn btn-ghost btn-sm" @click="copyText(S.drawer.outreaches[0].email_subject + '\\n\\n' + S.drawer.outreaches[0].email_body)">Copiar e-mail</button>
+            </div>
+            <div v-if="S.outreachTab==='whatsapp'">
+              <pre class="small" style="white-space:pre-wrap;background:var(--nx-bg, #f5f5f7);padding:12px;border-radius:10px;font-family:inherit">{{ S.drawer.outreaches[0].whatsapp_message }}</pre>
+              <button class="btn btn-ghost btn-sm" @click="copyText(S.drawer.outreaches[0].whatsapp_message)">Copiar mensagem</button>
+            </div>
+            <div v-if="S.outreachTab==='linkedin'">
+              <pre class="small" style="white-space:pre-wrap;background:var(--nx-bg, #f5f5f7);padding:12px;border-radius:10px;font-family:inherit">{{ S.drawer.outreaches[0].linkedin_message }}</pre>
+              <button class="btn btn-ghost btn-sm" @click="copyText(S.drawer.outreaches[0].linkedin_message)">Copiar mensagem</button>
+            </div>
+            <div v-if="S.outreachTab==='call'">
+              <pre class="small" style="white-space:pre-wrap;background:var(--nx-bg, #f5f5f7);padding:12px;border-radius:10px;font-family:inherit">{{ S.drawer.outreaches[0].call_script }}</pre>
+              <div class="section-title mt" style="font-size:13px">Pontos-chave</div>
+              <ul class="small" style="margin:0;padding-left:18px"><li v-for="tp in S.drawer.outreaches[0].talking_points">{{ tp }}</li></ul>
+            </div>
+            <div v-if="S.outreachTab==='objecoes'">
+              <div v-for="o in S.drawer.outreaches[0].objections" class="mb">
+                <p class="small" style="margin:0 0 4px"><b>“{{ o.objection }}”</b></p>
+                <p class="small muted" style="margin:0">{{ o.answer }}</p>
+              </div>
+            </div>
+            <p class="small muted mt">Gerado em {{ S.drawer.outreaches[0].created_at }} · revise e personalize antes de enviar.</p>
+          </div>
+          <p v-else class="small muted mt">Sem kit ainda. O agente gera e-mail de cold outreach, mensagens de WhatsApp/LinkedIn, roteiro de ligação e respostas a objeções — tudo personalizado para este lead.</p>
         </div>
       </div>
 

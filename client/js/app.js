@@ -31,6 +31,11 @@ const app = createApp({
       noteInput: '', savingPrice:false,
       newSupplier:{ name:'', country:'', currency:'USD' }, newProduct:{ supplier_id:'', name:'', sku:'', list_cost_usd:'' },
       newUser:{ name:'', email:'', password:'senha123', area:'vendas', role:'user' },
+      // SDR Agent
+      sdr: { configured:false, model:'' },
+      icp: { segment:'', size:'', region:'', software:'', notes:'', quantity: 8 },
+      prospects: [], researching:false, importingId:null,
+      genOutreach:false, genQualify:false, outreachTab:'email',
     });
 
     const stageLabel = (k) => (S.meta.stages.find(s => s.key === k) || {}).label || k;
@@ -43,7 +48,7 @@ const app = createApp({
       const me = await API.get('/api/auth/me');
       if (!me.ok) { S.ready = true; return; }
       S.user = me.data.data.user;
-      await Promise.all([loadMeta(), loadFx(), loadLeads(), loadCatalog(), loadConfig(), loadNotifications()]);
+      await Promise.all([loadMeta(), loadFx(), loadLeads(), loadCatalog(), loadConfig(), loadNotifications(), loadSdrStatus()]);
       S.ready = true;
     }
     async function loadMeta(){ const r = await API.get('/api/meta'); if (r.ok) S.meta = r.data.data; }
@@ -54,6 +59,42 @@ const app = createApp({
     async function loadTasks(){ const r = await API.get('/api/tasks'); if (r.ok) S.tasks = r.data.data; }
     async function loadUsers(){ const r = await API.get('/api/users'); if (r.ok) S.users = r.data.data; }
     async function loadNotifications(){ const r = await API.get('/api/notifications'); if (r.ok) S.notif = r.data.data; }
+    // ---------- SDR Agent ----------
+    async function loadSdrStatus(){ const r = await API.get('/api/sdr/status'); if (r.ok) S.sdr = r.data.data; }
+    async function loadProspects(){ const r = await API.get('/api/sdr/prospects'); if (r.ok) S.prospects = r.data.data; }
+    async function runResearch(){
+      if (S.researching) return; S.researching = true;
+      const r = await API.post('/api/sdr/research', S.icp);
+      S.researching = false;
+      if (r.ok) { flash(r.data.data.length + ' empresas-alvo encontradas.'); await loadProspects(); }
+      else flash((r.data && r.data.error && r.data.error.message) || 'Erro na pesquisa.');
+    }
+    async function importProspect(p){
+      S.importingId = p.id;
+      const r = await API.post('/api/sdr/prospects/' + p.id + '/import', {});
+      S.importingId = null;
+      if (r.ok) { flash(p.company_name + ' importado para o funil.'); await Promise.all([loadProspects(), loadLeads(), loadCatalog()]); }
+      else flash((r.data && r.data.error && r.data.error.message) || 'Erro ao importar.');
+    }
+    async function discardProspect(p){
+      await API.del('/api/sdr/prospects/' + p.id); await loadProspects(); flash('Prospect descartado.');
+    }
+    async function generateOutreach(){
+      if (S.genOutreach) return; S.genOutreach = true;
+      const r = await API.post('/api/sdr/leads/' + S.drawer.lead.id + '/outreach', {});
+      S.genOutreach = false;
+      if (r.ok) { flash('Kit de abordagem gerado.'); await refreshDrawer(); S.drawerTab='sdr'; S.outreachTab='email'; }
+      else flash((r.data && r.data.error && r.data.error.message) || 'Erro ao gerar abordagem.');
+    }
+    async function runQualify(){
+      if (S.genQualify) return; S.genQualify = true;
+      const r = await API.post('/api/sdr/leads/' + S.drawer.lead.id + '/qualify', {});
+      S.genQualify = false;
+      if (r.ok) { flash('Conta qualificada: ' + r.data.data.total_score + '/100 (Tier ' + r.data.data.tier + ').'); await refreshDrawer(); S.drawerTab='sdr'; }
+      else flash((r.data && r.data.error && r.data.error.message) || 'Erro ao qualificar.');
+    }
+    function tierColor(t){ return ({A:'var(--nx-success)',B:'var(--nx-warning, #FF9500)',C:'var(--nx-danger)'})[t] || 'var(--nx-text-mute)'; }
+    function fitColor(n){ return n>=80?'var(--nx-success)':(n>=60?'#FF9500':'var(--nx-text-mute)'); }
     async function markNotifRead(){ await API.post('/api/notifications/read', {}); await loadNotifications(); }
     function propLink(p){ return location.origin + '/p/' + p.token; }
     function propStatusLabel(p){ return ({draft:'Rascunho', sent:'Enviada', viewed:'Vista', accepted:'Aceita', rejected:'Recusada'})[p.status] || p.status; }
@@ -112,7 +153,8 @@ const app = createApp({
     // ---------- lead drawer ----------
     async function openLead(id){
       const r = await API.get('/api/leads/' + id);
-      if (r.ok) { S.drawer = r.data.data; S.drawerTab = 'resumo'; S.priceCalc = null;
+      if (r.ok) { const keepTab = S.drawer && S.drawer.lead.id === r.data.data.lead.id ? S.drawerTab : 'resumo';
+        S.drawer = r.data.data; S.drawerTab = keepTab; S.priceCalc = null;
         const q = S.drawer.quotes[0];
         S.quoteForm = { supplier_id:'', product_id: S.drawer.lead.product_id || '', cost_amount:'', cost_currency:'USD', qty: S.drawer.lead.qty || 1, supplier_ref:'', notes:'' };
         S.propInput = { final_price:'', approve_below_floor:false }; S.closeForm = { result:'', lost_reason:'' };
@@ -170,6 +212,7 @@ const app = createApp({
       if (r === '/' || r === '/dashboard') loadReport();
       if (r === '/tarefas') loadTasks();
       if (r === '/usuarios') loadUsers();
+      if (r === '/sdr') loadProspects();
     }, { immediate: false });
 
     onMounted(async () => { await bootstrap(); if ((route.value === '/' || route.value === '/dashboard') && S.user) loadReport(); });
@@ -184,7 +227,8 @@ const app = createApp({
       triage, toggleHot, addNote, submitQuote, runPricing, savePricing, sendProposal, closeLead,
       toggleTask, toggleTaskRow, updateContract, latestPricing, saveConfig, addSupplier, addProduct, addUser,
       loadReport, loadTasks, loadUsers, filteredContacts,
-      loadNotifications, markNotifRead, propLink, propStatusLabel, copyText, copyProposal, openProposal, sendPropEmail, isOverdue, isToday, srcColor, barPct };
+      loadNotifications, markNotifRead, propLink, propStatusLabel, copyText, copyProposal, openProposal, sendPropEmail, isOverdue, isToday, srcColor, barPct,
+      loadProspects, runResearch, importProspect, discardProspect, generateOutreach, runQualify, tierColor, fitColor };
   },
   template: APP_TEMPLATE(),
 });

@@ -5,6 +5,7 @@ const { verifyPassword, sign, hashPassword } = require('./auth');
 const { getUsdBrl } = require('./fx');
 const { calculatePricing } = require('./pricing');
 const { sendEmail, isConfigured } = require('./mailer');
+const sdr = require('./sdr');
 const S = store; // alias
 
 const STAGES = [
@@ -207,6 +208,8 @@ async function handle(req) {
         proposals: S.find('proposals', p=>p.lead_id===id).sort((a,b)=>b.version-a.version),
         tasks: S.find('tasks', t=>t.lead_id===id).sort((a,b)=> (a.done-b.done) || String(a.due_date||'').localeCompare(String(b.due_date||''))),
         contract: S.find('contracts', c=>c.lead_id===id).sort(byCreatedDesc)[0] || null,
+        outreaches: S.find('outreaches', o=>o.lead_id===id).sort(byCreatedDesc),
+        qualifications: S.find('qualifications', q=>q.lead_id===id).sort(byCreatedDesc),
       } } };
     }
     if (method === 'PATCH') {
@@ -261,6 +264,106 @@ async function handle(req) {
       return { status:200, body:{ success:true, data:{ status:'lost' } } };
     }
   }
+
+  // ==================== SDR AGENT ====================
+  // Status da IA
+  if (method==='GET' && path==='/api/sdr/status') {
+    return { status:200, body:{ success:true, data:{ configured: sdr.isConfigured(), model: sdr.MODEL } } };
+  }
+
+  // 1) Pesquisa de leads (gera prospects a partir do ICP)
+  if (method==='POST' && path==='/api/sdr/research') {
+    try {
+      const rows = await sdr.researchLeads(body||{}, { products: S.all('products') });
+      const batch = 'R' + Date.now().toString(36);
+      const saved = rows.map(p => S.insert('prospects', Object.assign({}, p, {
+        batch, icp: { segment:body.segment||null, size:body.size||null, region:body.region||null, software:body.software||null, notes:body.notes||null },
+        status:'new', created_by:user.id })));
+      notify('sdr_research', `SDR Agent: ${saved.length} empresas-alvo pesquisadas.`, null);
+      return { status:201, body:{ success:true, data: saved } };
+    } catch (e) { return { status:502, body:{ success:false, error:{ message: e.message } } }; }
+  }
+  // Lista de prospects
+  if (method==='GET' && path==='/api/sdr/prospects') {
+    const um = byId('users');
+    const rows = S.all('prospects').sort(byCreatedDesc).map(p=>Object.assign({}, p, { created_by_name: p.created_by&&um[p.created_by]?um[p.created_by].name:null }));
+    return { status:200, body:{ success:true, data: rows } };
+  }
+  // Descartar prospect
+  if ((m=P(/^\/api\/sdr\/prospects\/(\d+)$/)) && method==='DELETE') {
+    S.remove('prospects', +m[1]);
+    return { status:200, body:{ success:true } };
+  }
+  // Importar prospect para o funil (cria account + contact + lead)
+  if ((m=P(/^\/api\/sdr\/prospects\/(\d+)\/import$/)) && method==='POST') {
+    const p = S.get('prospects', +m[1]); if (!p) return notfound();
+    if (p.status==='imported' && p.lead_id) return { status:200, body:{ success:true, data:{ lead_id:p.lead_id, deduplicated:true } } };
+    let acc = S.findOne('accounts', a=> a.name.toLowerCase()===String(p.company_name||'').toLowerCase());
+    if (!acc) acc = S.insert('accounts', { name:p.company_name, cnpj:null, segment:p.segment||null, city:p.city||null });
+    const ct = S.insert('contacts', { account_id:acc.id, name:p.contact_name||'Contato a validar', email:null, phone:null, role_title:p.contact_role||null });
+    const lead = S.insert('leads', { title: p.company_name+' — '+(p.suggested_software||'Prospecção'),
+      account_id:acc.id, contact_id:ct.id, product_id:null, requested_software:p.suggested_software||null,
+      source:'outbound', stage:'novo_lead', owner_id:user.id, hot: (p.fit_score>=80?1:0), status:'open',
+      lost_reason:null, estimated_value:null, qty:1,
+      notes:'Prospect gerado pelo SDR Agent (fit '+(p.fit_score||'—')+'/100). '+(p.why_fit||''), updated_at:S.now() });
+    S.update('prospects', p.id, { status:'imported', lead_id:lead.id });
+    log(lead.id, user.id, 'sdr', 'Lead importado do SDR Agent — fit '+(p.fit_score||'—')+'/100. '+(p.why_fit||''));
+    notify('sdr_import', `SDR Agent: ${p.company_name} importado para o funil.`, lead.id);
+    return { status:201, body:{ success:true, data:{ lead_id: lead.id } } };
+  }
+
+  // 2) Preparar abordagem para um lead
+  if ((m=P(/^\/api\/sdr\/leads\/(\d+)\/outreach$/)) && method==='POST') {
+    const id=+m[1]; const lead = leadWithJoins(id); if (!lead) return notfound();
+    const acc = lead.account_id ? S.get('accounts', lead.account_id) : null;
+    const ct = lead.contact_id ? S.get('contacts', lead.contact_id) : null;
+    try {
+      const kit = await sdr.prepareOutreach({
+        company: lead.account_name, segment: acc?acc.segment:null, city: acc?acc.city:null,
+        contact: lead.contact_name, role: ct?ct.role_title:null,
+        software: lead.requested_software||lead.product_name, qty: lead.qty,
+        source: lead.source, notes: lead.notes, seller: lead.owner_name });
+      const row = S.insert('outreaches', Object.assign({ lead_id:id, created_by:user.id }, kit));
+      log(id, user.id, 'sdr', 'SDR Agent gerou kit de abordagem (e-mail, WhatsApp, LinkedIn e roteiro de ligação).');
+      return { status:201, body:{ success:true, data: row } };
+    } catch (e) { return { status:502, body:{ success:false, error:{ message: e.message } } }; }
+  }
+  if ((m=P(/^\/api\/sdr\/leads\/(\d+)\/outreach$/)) && method==='GET') {
+    const id=+m[1];
+    return { status:200, body:{ success:true, data: S.find('outreaches', o=>o.lead_id===id).sort(byCreatedDesc) } };
+  }
+
+  // 3) Qualificar lead (BANT)
+  if ((m=P(/^\/api\/sdr\/leads\/(\d+)\/qualify$/)) && method==='POST') {
+    const id=+m[1]; const lead = leadWithJoins(id); if (!lead) return notfound();
+    const acc = lead.account_id ? S.get('accounts', lead.account_id) : null;
+    const ct = lead.contact_id ? S.get('contacts', lead.contact_id) : null;
+    const acts = S.find('activities', a=>a.lead_id===id).sort(byCreatedDesc).slice(0,15)
+      .map(a=>'  ['+a.created_at+'] '+a.type+': '+a.message).join('\n');
+    try {
+      const q = await sdr.qualifyLead({
+        company: lead.account_name, segment: acc?acc.segment:null, city: acc?acc.city:null,
+        contact: lead.contact_name, role: ct?ct.role_title:null,
+        software: lead.requested_software||lead.product_name, qty: lead.qty,
+        value: lead.estimated_value, source: lead.source, stage: lead.stage, hot: lead.hot,
+        notes: lead.notes, timeline: acts });
+      const row = S.insert('qualifications', Object.assign({ lead_id:id, created_by:user.id }, q));
+      S.update('leads', id, { bant_score:q.total_score, bant_tier:q.tier, updated_at:S.now() });
+      if (q.tier==='A' && !lead.hot) S.update('leads', id, { hot:1 });
+      (q.next_actions||[]).slice(0,3).forEach((na,i)=>{
+        S.insert('tasks', { lead_id:id, title:'[SDR] '+na, type:'sdr_action', area:'vendas', assignee_id:lead.owner_id||user.id,
+          due_date:new Date(Date.now()+(i+1)*86400000).toISOString().slice(0,10), done:0 });
+      });
+      log(id, user.id, 'sdr', 'SDR Agent qualificou a conta (BANT): '+q.total_score+'/100 — Tier '+q.tier+'. '+q.summary);
+      notify('sdr_qualify', `SDR Agent: ${lead.account_name||lead.title} qualificado — ${q.total_score}/100 (Tier ${q.tier}).`, id);
+      return { status:201, body:{ success:true, data: row } };
+    } catch (e) { return { status:502, body:{ success:false, error:{ message: e.message } } }; }
+  }
+  if ((m=P(/^\/api\/sdr\/leads\/(\d+)\/qualify$/)) && method==='GET') {
+    const id=+m[1];
+    return { status:200, body:{ success:true, data: S.find('qualifications', q=>q.lead_id===id).sort(byCreatedDesc) } };
+  }
+  // ====================================================
 
   // ---- Cotação ----
   if (method==='POST' && path==='/api/quotes') {
