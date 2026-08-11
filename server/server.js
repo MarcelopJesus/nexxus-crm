@@ -11,7 +11,9 @@ const { handle } = require('./lib/api');
 const PORT = process.env.PORT || 3001;
 const CLIENT_DIR = path.join(__dirname, '..', 'client');
 
-seedIfEmpty();
+const store = require('./lib/store');
+// Snapshot do Supabase antes de tudo: se houver dados remotos, eles mandam.
+const ready = (store.initRemote ? store.initRemote() : Promise.resolve()).then(() => { seedIfEmpty(); });
 
 const MIME = { '.html':'text/html; charset=utf-8', '.js':'text/javascript; charset=utf-8',
   '.css':'text/css; charset=utf-8', '.json':'application/json', '.svg':'image/svg+xml',
@@ -80,7 +82,7 @@ const server = http.createServer(async (req, res) => {
 });
 
 const HOST = process.env.HOST || '0.0.0.0';
-server.listen(PORT, HOST, () => {
+ready.then(() => server.listen(PORT, HOST, () => {
   console.log(`\n  Nexxus CRM rodando em http://localhost:${PORT}`);
   console.log(`  Login demo: joao@nexxustech.one / senha123\n`);
-});
+}));
