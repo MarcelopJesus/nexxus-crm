@@ -22,6 +22,8 @@ function log(leadId, userId, type, message){ S.insert('activities', { lead_id:le
 function touchLead(id){ S.update('leads', id, { updated_at: S.now() }); }
 function getConfig(){ return S.data.config; }
 function byId(coll){ const m={}; S.data[coll].forEach(r=>m[r.id]=r); return m; }
+// Nome do cliente para a notificação — lead sem empresa cadastrada não vira "null".
+function clientName(lead){ return (lead && (lead.account_name || lead.contact_name || lead.title)) || 'Cliente'; }
 function notify(type, message, leadId){ S.insert('notifications', { type, message, lead_id: leadId||null, read:0 }); }
 function pickOwner(){
   const vend = S.find('users', u=>u.active && u.area==='vendas');
@@ -37,6 +39,66 @@ function baseUrl(req){
   return proto+'://'+host;
 }
 
+
+// Close Won compartilhado: fechamento manual (Vendas) e aceite do cliente na página
+// pública passam por aqui. Só age sobre lead ABERTO — lead já ganho (idempotência) ou
+// perdido não ganha contrato/tarefa/notificação novos; quem chama decide o que responder.
+// opts.setValue força o valor fechado (o aceite fecha pelo preço da proposta aceita).
+function closeWon(leadId, userId, opts) {
+  opts = opts || {};
+  const before = S.get('leads', leadId); if (!before) return null;
+  if (before.status !== 'open') return { skipped: before.status, lead: leadWithJoins(leadId) };
+  // lost_reason zerado: lead reaberto depois de perdido não pode fechar carregando o motivo antigo.
+  const patch = { status:'won', lost_reason:null, updated_at:S.now() };
+  if (opts.value != null && (opts.setValue || !before.estimated_value)) patch.estimated_value = opts.value;
+  S.update('leads', leadId, patch);
+  const lead = leadWithJoins(leadId);
+  const lastProp = S.find('proposals', p=>p.lead_id===leadId).sort((a,b)=>b.version-a.version)[0];
+  const val = (opts.setValue && opts.value != null) ? opts.value
+    : (lead.estimated_value || opts.value || (lastProp?lastProp.final_price:null));
+  S.insert('contracts', { lead_id:leadId, status:'pending', value:val, notes:null });
+  const jur = S.findOne('users', u=>u.area==='juridico' && u.active);
+  S.insert('tasks', { lead_id:leadId, title:'Emitir contrato — '+lead.title, type:'contract', area:'juridico', assignee_id:jur?jur.id:null, done:0, due_date:null });
+  notify('won', `Negócio GANHO: ${lead?lead.title:('#'+leadId)}.`, leadId);
+  log(leadId, userId, 'close', opts.message || 'Negócio GANHO (Close Won). Gatilho enviado ao Jurídico.');
+  return { skipped:null, lead };
+}
+
+// Registra a abertura da proposta pelo cliente. Toda abertura conta; só a primeira
+// notifica, marca "vista" e empurra o lead para Negociação. Proposta já decidida
+// (aceita/recusada) não rastreia mais nada — rastreio só faz sentido enquanto pendente.
+function registerProposalView(prop) {
+  if (prop.status === 'accepted' || prop.status === 'rejected') return;
+  const first = !prop.viewed_at;
+  const patch = { view_count: (prop.view_count||0) + 1, last_viewed_at: S.now() };
+  if (first) { patch.viewed_at = S.now(); patch.status = 'viewed'; }
+  S.update('proposals', prop.id, patch);
+  if (!first) return;
+  const lead = leadWithJoins(prop.lead_id);
+  log(prop.lead_id, null, 'proposal', `Proposta v${prop.version} foi ABERTA pelo cliente.`);
+  notify('proposal_viewed', `${clientName(lead)} abriu a proposta v${prop.version}.`, prop.lead_id);
+  const l = S.get('leads', prop.lead_id);
+  if (l && l.stage === 'proposta_enviada' && l.status === 'open') {
+    S.update('leads', prop.lead_id, { stage:'negociacao', updated_at:S.now() });
+    log(prop.lead_id, null, 'stage_change', 'Movido para Negociação — cliente abriu a proposta (negócio na mão do cliente).');
+  }
+}
+// Guardas dos links públicos: negócio já encerrado ou versão superada não decidem nada.
+// Devolve a resposta 409 pronta, ou null quando o link ainda vale.
+function linkVencido(prop, leadRow) {
+  if (!leadRow || leadRow.status !== 'open')
+    return { status:409, body:{ success:false, error:{ message:'Este negócio já foi encerrado. Fale com o responsável comercial para reabrir a proposta.' } } };
+  const newer = S.find('proposals', p=>p.lead_id===prop.lead_id && p.version>prop.version)
+    .sort((a,b)=>b.version-a.version)[0];
+  if (newer)
+    return { status:409, body:{ success:false, error:{ message:`Há uma proposta mais recente (v${newer.version}). Peça o link atualizado ao responsável comercial.` } } };
+  return null;
+}
+// preview=1: o time abre a própria proposta sem contaminar o rastreio.
+function isPreview(req) {
+  const v = String(((req.query)||{}).preview || '').toLowerCase();
+  return v === '1' || v === 'true' || v === 'yes';
+}
 
 function leadWithJoins(id) {
   const l = S.get('leads', id); if (!l) return null;
@@ -134,22 +196,51 @@ async function handle(req) {
   // Página pública da proposta (rastreio de abertura).
   if ((m=P(/^\/api\/public\/proposals\/([a-f0-9]{16,})$/)) && method==='GET') {
     const prop = S.findOne('proposals', x=> x.token===m[1]); if (!prop) return notfound();
+    if (!isPreview(req)) registerProposalView(prop);
     const lead = leadWithJoins(prop.lead_id);
-    if (!prop.viewed_at) { S.update('proposals', prop.id, { viewed_at:S.now(), status: prop.status==='accepted'?'accepted':'viewed' });
-      log(prop.lead_id, null, 'proposal', `Proposta v${prop.version} foi ABERTA pelo cliente.`);
-      notify('proposal_viewed', `${lead?lead.account_name:'Cliente'} abriu a proposta v${prop.version}.`, prop.lead_id); }
     return { status:200, body:{ success:true, data:{
       company: lead?lead.account_name:null, contact: lead?lead.contact_name:null,
       software: lead?(lead.requested_software||lead.product_name):null, seller: lead?lead.owner_name:null,
       version: prop.version, final_price: prop.final_price, status: prop.status,
-      created_at: prop.created_at, accepted_at: prop.accepted_at||null } } };
+      created_at: prop.created_at, accepted_at: prop.accepted_at||null,
+      rejected_at: prop.rejected_at||null, reject_reason: prop.reject_reason||null } } };
   }
   if ((m=P(/^\/api\/public\/proposals\/([a-f0-9]{16,})\/accept$/)) && method==='POST') {
     const prop = S.findOne('proposals', x=> x.token===m[1]); if (!prop) return notfound();
-    S.update('proposals', prop.id, { status:'accepted', accepted_at:S.now() });
-    const lead = leadWithJoins(prop.lead_id);
-    log(prop.lead_id, null, 'proposal', `Proposta v${prop.version} ACEITA pelo cliente.`);
-    notify('proposal_accepted', `${lead?lead.account_name:'Cliente'} ACEITOU a proposta v${prop.version}! 🎉`, prop.lead_id);
+    const leadRow = S.get('leads', prop.lead_id);
+    // Reaceite do mesmo link num negócio já fechado por ele: idempotente, devolve 200.
+    const idempotente = prop.status==='accepted' && leadRow && leadRow.status==='won';
+    if (!idempotente) {
+      const barrado = linkVencido(prop, leadRow); if (barrado) return barrado;
+      // Cliente mudou de ideia: o estado atual vira aceita e limpa a recusa
+      // (o "não" continua registrado na timeline).
+      S.update('proposals', prop.id, { status:'accepted', accepted_at:S.now(), rejected_at:null, reject_reason:null });
+      const lead = leadWithJoins(prop.lead_id);
+      log(prop.lead_id, null, 'proposal', `Proposta v${prop.version} ACEITA pelo cliente.`);
+      notify('proposal_accepted', `${clientName(lead)} ACEITOU a proposta v${prop.version}! 🎉`, prop.lead_id);
+    }
+    // Aceite do cliente fecha o negócio sozinho (mesma trilha do Close Won manual),
+    // sempre pelo preço da proposta aceita — foi por ele que o negócio fechou.
+    closeWon(prop.lead_id, null, { value: prop.final_price, setValue: true,
+      message: `Negócio GANHO — cliente aceitou a proposta v${prop.version} na página pública. Gatilho enviado ao Jurídico.` });
+    return { status:200, body:{ success:true } };
+  }
+  // Recusa do cliente: registra o não, mas quem decide marcar o lead como perdido é gente.
+  if ((m=P(/^\/api\/public\/proposals\/([a-f0-9]{16,})\/reject$/)) && method==='POST') {
+    const prop = S.findOne('proposals', x=> x.token===m[1]); if (!prop) return notfound();
+    if (prop.status === 'accepted')
+      return { status:409, body:{ success:false, error:{ message:'Esta proposta já foi aceita. Fale com o responsável comercial para revisá-la.' } } };
+    // Texto puro vindo de fora: sem controle, sem tamanho ilimitado. Quem exibe escapa.
+    const reason = String(body.reason||'').replace(/[\u0000-\u001F\u007F]/g, ' ').trim().slice(0, 1000);
+    // Re-recusar a mesma proposta é idempotente; fora isso valem as guardas do aceite,
+    // senão um link velho gera notificação falsa de "cliente recusou".
+    if (prop.status !== 'rejected') {
+      const barrado = linkVencido(prop, S.get('leads', prop.lead_id)); if (barrado) return barrado;
+      S.update('proposals', prop.id, { status:'rejected', rejected_at:S.now(), reject_reason: reason||null });
+      const lead = leadWithJoins(prop.lead_id);
+      log(prop.lead_id, null, 'proposal', `Proposta v${prop.version} RECUSADA pelo cliente.`+(reason?(' Motivo: '+reason):''));
+      notify('proposal_rejected', `${clientName(lead)} recusou a proposta v${prop.version}.`+(reason?(' Motivo: '+reason):''), prop.lead_id);
+    }
     return { status:200, body:{ success:true } };
   }
   // ======================================================================
@@ -248,19 +339,24 @@ async function handle(req) {
   if ((m=P(/^\/api\/leads\/(\d+)\/close$/)) && method==='POST') {
     const id=+m[1]; const result=body.result;
     if (result==='won') {
-      S.update('leads', id, { status:'won' });
-      const lead = leadWithJoins(id);
-      const lastProp = S.find('proposals', p=>p.lead_id===id).sort((a,b)=>b.version-a.version)[0];
-      const val = lead.estimated_value || (lastProp?lastProp.final_price:null);
-      S.insert('contracts', { lead_id:id, status:'pending', value:val, notes:null });
-      const jur = S.findOne('users', u=>u.area==='juridico' && u.active);
-      S.insert('tasks', { lead_id:id, title:'Emitir contrato — '+lead.title, type:'contract', area:'juridico', assignee_id:jur?jur.id:null, done:0, due_date:null });
-      notify('won', `Negócio GANHO: ${lead?lead.title:('#'+id)}.`, id);
-      log(id, user.id, 'close', 'Negócio GANHO (Close Won). Gatilho enviado ao Jurídico.');
+      const r = closeWon(id, user.id); if (!r) return notfound();
+      if (r.skipped === 'lost')
+        return { status:409, body:{ success:false, error:{ message:'Este lead está marcado como PERDIDO. Reabra-o antes de fechar como ganho.' } } };
       return { status:200, body:{ success:true, data:{ status:'won' } } };
     } else {
-      S.update('leads', id, { status:'lost', lost_reason: body.lost_reason||'Não informado' });
-      log(id, user.id, 'close', 'Negócio PERDIDO (Close Lost). Motivo: '+(body.lost_reason||'Não informado'));
+      const before = S.get('leads', id); if (!before) return notfound();
+      const wasWon = before.status === 'won';
+      const motivo = body.lost_reason||'Não informado';
+      S.update('leads', id, { status:'lost', lost_reason: motivo, updated_at:S.now() });
+      // Reverter um ganho é decisão humana, mas a pendência do Close Won não pode
+      // ficar de pé: contrato pendente vira cancelado e a tarefa do jurídico encerra.
+      if (wasWon) {
+        S.find('contracts', c=>c.lead_id===id && (c.status==='pending'||c.status==='drafting')).forEach(c=> S.update('contracts', c.id, { status:'cancelled' }));
+        S.find('tasks', t=>t.lead_id===id && t.type==='contract' && !t.done).forEach(t=> S.update('tasks', t.id, { done:1 }));
+      }
+      log(id, user.id, 'close', (wasWon?'Negócio revertido de GANHO para PERDIDO — contrato pendente cancelado e tarefa do Jurídico encerrada. ':'')
+        + 'Negócio PERDIDO (Close Lost). Motivo: '+motivo);
+      if (wasWon) notify('lost_after_won', `Negócio revertido de GANHO para PERDIDO: ${clientName(leadWithJoins(id))}. Motivo: ${motivo}.`, id);
       return { status:200, body:{ success:true, data:{ status:'lost' } } };
     }
   }
@@ -417,7 +513,8 @@ async function handle(req) {
         data:{ floor, suggested } } };
     const row = S.insert('proposals', { lead_id:leadId, version:last+1, final_price:finalPrice, min_price:floor||null,
       suggested_price:suggested, below_floor:below, approved_by:below?user.id:null, status:'sent',
-      token:makeToken(), viewed_at:null, accepted_at:null, created_by:user.id });
+      token:makeToken(), viewed_at:null, accepted_at:null, rejected_at:null, reject_reason:null,
+      view_count:0, last_viewed_at:null, created_by:user.id });
     S.update('leads', leadId, { stage:'proposta_enviada', estimated_value:finalPrice, updated_at:S.now() });
     for (const d of [3,7,15])
       S.insert('tasks', { lead_id:leadId, title:`Follow-up proposta v${last+1} (D+${d})`, type:'followup', area:'vendas', assignee_id:user.id, due_date:new Date(Date.now()+d*86400000).toISOString().slice(0,10), done:0 });
@@ -439,7 +536,9 @@ async function handle(req) {
       + `<p><a href="${link}" style="background:#0071E3;color:#fff;padding:12px 20px;border-radius:980px;text-decoration:none;font-weight:600">Ver proposta</a></p>`
       + `<p style="color:#86868B;font-size:13px">Ou copie: ${link}</p></div>`;
     const r = await sendEmail({ to, subject:'Sua proposta — NexxusCRM', html });
-    if (r.sent) { S.update('proposals', prop.id, { status: prop.status==='accepted'?'accepted':'sent' });
+    // Reenviar o e-mail não ressuscita proposta já decidida (aceita ou recusada).
+    const decided = prop.status==='accepted' || prop.status==='rejected';
+    if (r.sent) { S.update('proposals', prop.id, { status: decided ? prop.status : 'sent' });
       log(prop.lead_id, user.id, 'proposal', 'Proposta enviada por e-mail para '+to+'.'); }
     return { status:200, body:{ success:true, data:{ link, email: r, configured: isConfigured() } } };
   }

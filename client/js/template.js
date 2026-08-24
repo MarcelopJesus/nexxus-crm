@@ -65,7 +65,7 @@ function APP_TEMPLATE() { return `
           <div v-if="S.showNotif" style="position:absolute;right:0;top:44px;width:330px;background:#fff;border:1px solid var(--nx-border);border-radius:14px;box-shadow:var(--nx-shadow-lg);z-index:60;max-height:400px;overflow:auto">
             <div style="padding:12px 14px;font-weight:700;border-bottom:1px solid var(--nx-border)">Notificações</div>
             <div v-for="n in S.notif.items" :key="n.id" style="padding:11px 14px;border-bottom:1px solid var(--nx-border);font-size:13px" @click="n.lead_id && openLead(n.lead_id); S.showNotif=false" :style="{cursor: n.lead_id?'pointer':'default'}">
-              <div>{{ n.message }}</div><div class="muted" style="font-size:11.5px;margin-top:2px">{{ n.created_at }}</div>
+              <div>{{ n.message }}</div><div class="muted" style="font-size:11.5px;margin-top:2px">{{ fmtDT(n.created_at) }}</div>
             </div>
             <p v-if="!S.notif.items.length" class="muted small" style="padding:16px">Nenhuma notificação ainda.</p>
           </div>
@@ -178,7 +178,7 @@ function APP_TEMPLATE() { return `
               <td>{{ AREA_LABEL[t.area]||t.area||'—' }}</td>
               <td class="muted">{{ t.lead_title || '—' }}</td>
               <td>{{ t.assignee_name || '—' }}</td>
-              <td class="mono small">{{ t.due_date || '—' }} <span v-if="isOverdue(t)" class="badge lost">Atrasada</span><span v-else-if="isToday(t)" class="badge" style="background:#fff3e0;color:#c46a00">Hoje</span></td>
+              <td class="mono small">{{ fmtD(t.due_date) }} <span v-if="isOverdue(t)" class="badge lost">Atrasada</span><span v-else-if="isToday(t)" class="badge" style="background:#fff3e0;color:#c46a00">Hoje</span></td>
             </tr>
             <tr v-if="!S.tasks.length"><td colspan="7" class="muted" style="padding:20px">Nenhuma tarefa.</td></tr>
           </tbody></table>
@@ -390,7 +390,7 @@ function DRAWER_TEMPLATE() { return `
             <div class="flex center gap mb">
               <div style="font-size:34px;font-weight:800" :style="{color: tierColor(S.drawer.qualifications[0].tier)}">{{ S.drawer.qualifications[0].total_score }}<span class="muted" style="font-size:15px;font-weight:600">/100</span></div>
               <span class="badge" :style="{background: tierColor(S.drawer.qualifications[0].tier), color:'#fff'}">Tier {{ S.drawer.qualifications[0].tier }}</span>
-              <span class="small muted">{{ S.drawer.qualifications[0].created_at }}</span>
+              <span class="small muted">{{ fmtDT(S.drawer.qualifications[0].created_at) }}</span>
             </div>
             <p class="small" style="margin-top:0">{{ S.drawer.qualifications[0].summary }}</p>
             <div class="row2">
@@ -452,7 +452,7 @@ function DRAWER_TEMPLATE() { return `
                 <p class="small muted" style="margin:0">{{ o.answer }}</p>
               </div>
             </div>
-            <p class="small muted mt">Gerado em {{ S.drawer.outreaches[0].created_at }} · revise e personalize antes de enviar.</p>
+            <p class="small muted mt">Gerado em {{ fmtDT(S.drawer.outreaches[0].created_at) }} · revise e personalize antes de enviar.</p>
           </div>
           <p v-else class="small muted mt">Sem kit ainda. O agente gera e-mail de cold outreach, mensagens de WhatsApp/LinkedIn, roteiro de ligação e respostas a objeções — tudo personalizado para este lead.</p>
         </div>
@@ -479,7 +479,7 @@ function DRAWER_TEMPLATE() { return `
         <div class="card card-p" v-if="S.drawer.quotes.length">
           <div class="section-title">Cotações registradas</div>
           <table class="tbl"><thead><tr><th>Custo</th><th>Fornecedor</th><th>Qtd</th><th>Ref</th><th>Quando</th></tr></thead>
-          <tbody><tr v-for="q in S.drawer.quotes" :key="q.id"><td class="mono">{{ q.cost_currency }} {{ q.cost_amount }}</td><td>{{ q.supplier_name||'—' }}</td><td>{{ q.qty }}</td><td>{{ q.supplier_ref||'—' }}</td><td class="small muted">{{ q.created_at }}</td></tr></tbody></table>
+          <tbody><tr v-for="q in S.drawer.quotes" :key="q.id"><td class="mono">{{ q.cost_currency }} {{ q.cost_amount }}</td><td>{{ q.supplier_name||'—' }}</td><td>{{ q.qty }}</td><td>{{ q.supplier_ref||'—' }}</td><td class="small muted">{{ fmtDT(q.created_at) }}</td></tr></tbody></table>
         </div>
       </div>
 
@@ -528,8 +528,12 @@ function DRAWER_TEMPLATE() { return `
           <tbody><tr v-for="p in S.drawer.proposals" :key="p.id">
             <td>v{{ p.version }}</td>
             <td class="mono">{{ BRL(p.final_price) }} <span v-if="p.below_floor" class="badge lost">abaixo piso</span></td>
-            <td><span class="badge" :class="{won:p.status==='accepted',open:p.status!=='accepted'}">{{ propStatusLabel(p) }}</span><div class="muted" style="font-size:11px" v-if="p.viewed_at">visto {{ p.viewed_at }}</div><div class="muted" style="font-size:11px" v-if="p.accepted_at">aceito {{ p.accepted_at }}</div></td>
-            <td><div class="flex gap wrap"><button class="btn btn-ghost btn-sm" @click="copyProposal(p)">Copiar link</button><button class="btn btn-ghost btn-sm" @click="openProposal(p)">Abrir</button><button class="btn btn-sm" @click="sendPropEmail(p)">Enviar e-mail</button></div></td>
+            <td><span class="badge" :class="{won:p.status==='accepted',lost:p.status==='rejected',open:p.status!=='accepted'&&p.status!=='rejected'}">{{ propStatusLabel(p) }}</span>
+              <div class="muted" style="font-size:11px" v-if="p.view_count">Aberta {{ p.view_count }}× · última {{ fmtDT(p.last_viewed_at||p.viewed_at) }}</div>
+              <div class="muted" style="font-size:11px" v-else-if="p.viewed_at">visto {{ fmtDT(p.viewed_at) }}</div>
+              <div class="muted" style="font-size:11px" v-if="p.accepted_at">aceito {{ fmtDT(p.accepted_at) }}</div>
+              <div class="muted" style="font-size:11px" v-if="p.rejected_at">recusada {{ fmtDT(p.rejected_at) }}<span v-if="p.reject_reason"> · {{ p.reject_reason }}</span></div></td>
+            <td><div class="flex gap wrap"><button class="btn btn-ghost btn-sm" @click="copyProposal(p)">Copiar link</button><button class="btn btn-ghost btn-sm" @click="openProposal(p)" title="Abre em modo preview — não conta como abertura do cliente">Abrir (preview)</button><button class="btn btn-sm" @click="sendPropEmail(p)">Enviar e-mail</button></div></td>
           </tr></tbody></table>
         </div>
       </div>
@@ -569,7 +573,7 @@ function DRAWER_TEMPLATE() { return `
         <div class="card card-p"><div class="section-title">Histórico</div>
           <div class="timeline">
             <div v-for="a in S.drawer.activities" :key="a.id" class="tl-item">
-              <div class="flex between"><span class="tl-type">{{ a.type }}</span><span class="tl-time">{{ a.created_at }}</span></div>
+              <div class="flex between"><span class="tl-type">{{ a.type }}</span><span class="tl-time">{{ fmtDT(a.created_at) }}</span></div>
               <div class="small">{{ a.message }} <span class="muted" v-if="a.user_name">· {{ a.user_name }}</span></div>
             </div>
             <p v-if="!S.drawer.activities.length" class="muted small">Sem eventos.</p>

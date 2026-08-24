@@ -18,42 +18,109 @@
     .row{ display:flex; justify-content:space-between; padding:11px 0; border-bottom:1px solid var(--nx-border); font-size:14px; }
     .btn{ display:inline-flex; align-items:center; justify-content:center; padding:13px 24px; border:none; border-radius:980px; background:var(--nx-primary); color:#fff; font-weight:600; font-size:15px; cursor:pointer; }
     .btn:hover{ background:var(--nx-primary-600); }
+    .btn:disabled{ opacity:.45; cursor:not-allowed; }
+    .btn-ghost{ background:#fff; color:var(--nx-text-soft); border:1px solid var(--nx-border); }
+    .btn-ghost:hover{ background:var(--nx-surface-2); }
+    .actions{ display:flex; gap:10px; flex-wrap:wrap; margin-top:22px; }
+    .reason{ width:100%; box-sizing:border-box; margin-top:14px; padding:12px; border:1px solid var(--nx-border); border-radius:14px; font-family:var(--nx-font); font-size:14px; color:var(--nx-text); }
     .pill{ font-size:12px; font-weight:700; padding:4px 12px; border-radius:980px; }
     .ok{ background:#e7f7ec; color:#1a7f37; } .info{ background:#eaf3ff; color:#0058B8; }
+    .bad{ background:#fdecec; color:#b3261e; }
     .center{ text-align:center; }
+    .preview-bar{ background:#fff8e6; border:1px solid #f0c36d; color:#7a5300; border-radius:14px; padding:10px 14px; font-size:13px; margin-top:22px; }
   </style>
 </head>
 <body>
   <div class="wrap">
     <div class="brand">Nexxus<span>CRM</span></div>
+    <div id="preview" class="preview-bar" style="display:none"><b>Modo preview (equipe).</b> Esta visita não conta como abertura do cliente e os botões estão desativados.</div>
     <div id="content" class="card"><p class="muted">Carregando proposta…</p></div>
     <p class="center muted" style="font-size:12px;margin-top:20px">Proposta gerada pelo NexxusCRM · NexxusTECH</p>
   </div>
   <script>
     var token = location.pathname.split('/p/')[1] || '';
     var el = document.getElementById('content');
+    // preview=1: o time abre a própria proposta sem registrar abertura no rastreio.
+    var preview = /(^|[?&])preview=(1|true|yes)(&|$)/i.test(location.search);
+    var qs = preview ? '?preview=1' : '';
     function brl(n){ return 'R$ ' + Number(n||0).toLocaleString('pt-BR',{minimumFractionDigits:2,maximumFractionDigits:2}); }
-    function statusPill(s){ if(s==='accepted') return '<span class="pill ok">Aceita</span>'; if(s==='viewed') return '<span class="pill info">Visualizada</span>'; return '<span class="pill info">Enviada</span>'; }
-    fetch('/api/public/proposals/' + token).then(function(r){ return r.json(); }).then(function(res){
+    // Tudo que vem de fora (empresa, contato, software, motivo da recusa, erro da API)
+    // é texto do cliente — escapar antes de entrar em innerHTML.
+    function esc(v){ return String(v==null?'':v).replace(/[&<>"']/g, function(c){
+      return ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' })[c]; }); }
+    // O servidor grava em UTC ("YYYY-MM-DD HH:MM:SS"); sem o "Z" o navegador leria como hora local.
+    function fmtDT(v){ if(!v) return '';
+      var s = String(v).trim();
+      if(/^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}(:\d{2})?$/.test(s)) s = s.replace(' ','T') + 'Z';
+      var d = new Date(s); if(isNaN(d.getTime())) return String(v);
+      return d.toLocaleString('pt-BR',{ timeZone:'America/Sao_Paulo', day:'2-digit', month:'2-digit', year:'numeric', hour:'2-digit', minute:'2-digit' }); }
+    function statusPill(s){ var c='pill info', t='Enviada';
+      if(s==='accepted'){ c='pill ok'; t='Aceita'; } else if(s==='rejected'){ c='pill bad'; t='Recusada'; } else if(s==='viewed'){ t='Visualizada'; }
+      return '<span id="statuspill" class="'+c+'">'+t+'</span>'; }
+    // Fecha a decisão na tela: some com os botões, mostra o aviso e atualiza a etiqueta de status.
+    function done(html, status){ var p = el.querySelector('.price'); var box = document.getElementById('decision');
+      if (box) box.remove();
+      var err = document.getElementById('erro'); if (err) err.remove();
+      if (p) p.insertAdjacentHTML('afterend', html);
+      var sp = document.getElementById('statuspill');
+      if (sp && status) sp.outerHTML = statusPill(status); }
+    if (preview) document.getElementById('preview').style.display='block';
+    fetch('/api/public/proposals/' + token + qs).then(function(r){ return r.json(); }).then(function(res){
       if(!res.success){ el.innerHTML='<p class="muted">Proposta não encontrada ou expirada.</p>'; return; }
       var d = res.data;
-      var accepted = d.status==='accepted';
+      var decided = d.status==='accepted' || d.status==='rejected';
+      var closing = '';
+      if (d.status==='accepted') closing = '<p class="pill ok" style="display:inline-block;margin-top:10px">✓ Proposta aceita em '+esc(fmtDT(d.accepted_at))+'</p>';
+      else if (d.status==='rejected') closing = '<p class="pill bad" style="display:inline-block;margin-top:10px">Proposta recusada em '+esc(fmtDT(d.rejected_at))+'</p>'
+        + (d.reject_reason ? '<p class="muted" style="font-size:13px">Motivo informado: '+esc(d.reject_reason)+'</p>' : '');
       el.innerHTML =
         '<div style="display:flex;justify-content:space-between;align-items:center"><h2 style="margin:0">Proposta comercial</h2>'+statusPill(d.status)+'</div>'+
-        '<p class="soft">Preparada para <b>'+(d.company||'sua empresa')+'</b>'+(d.contact?(' · a/c '+d.contact):'')+'</p>'+
-        '<div class="row"><span class="muted">Solução</span><b>'+(d.software||'Solução de software')+'</b></div>'+
-        '<div class="row"><span class="muted">Versão da proposta</span><span>v'+d.version+'</span></div>'+
-        '<div class="row"><span class="muted">Responsável comercial</span><span>'+(d.seller||'—')+'</span></div>'+
+        '<p class="soft">Preparada para <b>'+esc(d.company||'sua empresa')+'</b>'+(d.contact?(' · a/c '+esc(d.contact)):'')+'</p>'+
+        '<div class="row"><span class="muted">Solução</span><b>'+esc(d.software||'Solução de software')+'</b></div>'+
+        '<div class="row"><span class="muted">Versão da proposta</span><span>v'+esc(d.version)+'</span></div>'+
+        '<div class="row"><span class="muted">Responsável comercial</span><span>'+esc(d.seller||'—')+'</span></div>'+
         '<p class="muted" style="margin:22px 0 0">Investimento total</p><div class="price">'+brl(d.final_price)+'</div>'+
-        (accepted
-          ? '<p class="pill ok" style="display:inline-block;margin-top:10px">✓ Proposta aceita em '+(d.accepted_at||'')+'</p>'
-          : '<div style="margin-top:22px"><button class="btn" id="acc">Aceitar proposta</button></div>');
-      var b=document.getElementById('acc');
-      if(b) b.onclick=function(){ b.disabled=true; b.textContent='Enviando…';
-        fetch('/api/public/proposals/'+token+'/accept',{method:'POST'}).then(function(r){return r.json();}).then(function(){
-          el.querySelector('.price').insertAdjacentHTML('afterend','<p class="pill ok" style="display:inline-block;margin-top:14px">✓ Proposta aceita! Nossa equipe entrará em contato.</p>');
-          b.remove();
-        }); };
+        (decided ? closing
+          : '<div id="decision">'
+            + '<div class="actions"><button class="btn" id="acc"'+(preview?' disabled':'')+'>Aceitar proposta</button>'
+            + '<button class="btn btn-ghost" id="rej"'+(preview?' disabled':'')+'>Recusar proposta</button></div>'
+            + '<div id="rejbox" style="display:none">'
+            + '<textarea class="reason" id="reason" rows="3" placeholder="Se quiser, conte o motivo (opcional) — preço, prazo, escolheu outro fornecedor…"></textarea>'
+            + '<div class="actions" style="margin-top:10px"><button class="btn btn-ghost" id="rejok">Confirmar recusa</button>'
+            + '<button class="btn btn-ghost" id="rejcancel">Voltar</button></div></div>'
+            + '</div>');
+      var acc=document.getElementById('acc'), rej=document.getElementById('rej');
+      var box=document.getElementById('rejbox'), rejok=document.getElementById('rejok'), rejcancel=document.getElementById('rejcancel');
+      // Mostra o erro que a API devolveu (ex.: 409 de proposta antiga) sem fingir sucesso.
+      function falhou(msg, restore){ var box = document.getElementById('erro');
+        if (!box) { var alvo = document.getElementById('decision') || el.querySelector('.price');
+          if (alvo) alvo.insertAdjacentHTML(alvo.id==='decision' ? 'beforebegin' : 'afterend',
+            '<p id="erro" class="pill bad" style="display:inline-block;margin-top:14px"></p>');
+          box = document.getElementById('erro'); }
+        if (box) box.textContent = msg; // textContent: mensagem da API nunca vira HTML
+        if (restore) restore(); }
+      // Trata a resposta: só declara sucesso com HTTP ok E success:true no corpo.
+      function decidir(url, payload, okHtml, okStatus, erroPadrao, restore){
+        return fetch(url, payload).then(function(r){
+          return r.json().catch(function(){ return null; }).then(function(out){
+            if (r.ok && out && out.success) return done(okHtml, okStatus);
+            falhou((out && out.error && out.error.message) || erroPadrao, restore);
+          });
+        }).catch(function(){ falhou('Sem conexão com o servidor. Tente novamente.', restore); });
+      }
+      if(acc) acc.onclick=function(){ acc.disabled=true; if(rej) rej.disabled=true; acc.textContent='Enviando…';
+        decidir('/api/public/proposals/'+token+'/accept', { method:'POST' },
+          '<p class="pill ok" style="display:inline-block;margin-top:14px">✓ Proposta aceita! Nossa equipe entrará em contato.</p>', 'accepted',
+          'Não foi possível registrar o aceite.',
+          function(){ acc.disabled=false; acc.textContent='Aceitar proposta'; if(rej) rej.disabled=false; }); };
+      if(rej) rej.onclick=function(){ box.style.display='block'; rej.style.display='none'; };
+      if(rejcancel) rejcancel.onclick=function(){ box.style.display='none'; rej.style.display='inline-flex'; };
+      if(rejok) rejok.onclick=function(){ rejok.disabled=true; rejcancel.disabled=true; rejok.textContent='Enviando…';
+        decidir('/api/public/proposals/'+token+'/reject',
+          { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ reason: document.getElementById('reason').value }) },
+          '<p class="pill bad" style="display:inline-block;margin-top:14px">Proposta recusada. Obrigado pelo retorno — nossa equipe entrará em contato.</p>', 'rejected',
+          'Não foi possível registrar a recusa.',
+          function(){ rejok.disabled=false; rejcancel.disabled=false; rejok.textContent='Confirmar recusa'; }); };
     }).catch(function(){ el.innerHTML='<p class="muted">Erro ao carregar a proposta.</p>'; });
   </script>
 </body>

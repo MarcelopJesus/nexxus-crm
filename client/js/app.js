@@ -5,7 +5,23 @@ const { createApp, reactive, ref, computed, onMounted, watch, h } = Vue;
 const BRL = (n) => 'R$ ' + Number(n || 0).toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const PCT = (n) => (Number(n || 0) * 100).toLocaleString('pt-BR', { maximumFractionDigits: 2 }) + '%';
 const initials = (name) => (name || '?').split(' ').map(s => s[0]).slice(0, 2).join('').toUpperCase();
-const AREA_LABEL = { vendas:'Vendas', prevendas:'Pré-vendas', compras:'Compras', produto:'Produto', marketing:'Marketing', financeiro:'Financeiro', juridico:'Jurídico', admin:'Admin' };
+// O servidor grava em UTC no formato "YYYY-MM-DD HH:MM:SS" (sem fuso): sem o "Z" o
+// navegador leria como hora local e a tela ficava 3h adiantada.
+const TZ = 'America/Sao_Paulo';
+function toDate(v) {
+  if (!v) return null;
+  let s = String(v).trim();
+  if (/^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}(:\d{2})?(\.\d+)?$/.test(s)) s = s.replace(' ', 'T') + 'Z';
+  const d = new Date(s);
+  return isNaN(d.getTime()) ? null : d;
+}
+// Data + hora de Brasília (ex.: 24/08/26 15:42).
+const fmtDT = (v) => { const d = toDate(v); return d ? d.toLocaleString('pt-BR', { timeZone: TZ, day: '2-digit', month: '2-digit', year: '2-digit', hour: '2-digit', minute: '2-digit' }) : '—'; };
+// Data pura (due_date "YYYY-MM-DD") — sem conversão de fuso, senão vira o dia anterior.
+const fmtD = (v) => { if (!v) return '—'; const p = String(v).slice(0, 10).split('-'); return p.length === 3 ? p[2] + '/' + p[1] + '/' + p[0] : String(v); };
+// Hoje em Brasília, no formato do due_date.
+const todayBR = () => new Date().toLocaleDateString('en-CA', { timeZone: TZ });
+const AREA_LABEL ={ vendas:'Vendas', prevendas:'Pré-vendas', compras:'Compras', produto:'Produto', marketing:'Marketing', financeiro:'Financeiro', juridico:'Jurídico', admin:'Admin' };
 
 const app = createApp({
   setup() {
@@ -100,7 +116,8 @@ const app = createApp({
     function propStatusLabel(p){ return ({draft:'Rascunho', sent:'Enviada', viewed:'Vista', accepted:'Aceita', rejected:'Recusada'})[p.status] || p.status; }
     async function copyText(t){ try { await navigator.clipboard.writeText(t); flash('Link copiado.'); } catch(e) { flash('Copie: ' + t); } }
     function copyProposal(p){ copyText(propLink(p)); }
-    function openProposal(p){ window.open(propLink(p), '_blank'); }
+    // O time abre em modo preview: não conta abertura nem move o lead de estágio.
+    function openProposal(p){ window.open(propLink(p) + '?preview=1', '_blank'); }
     async function sendPropEmail(p){
       const r = await API.post('/api/proposals/' + p.id + '/send-email', {});
       if (!r.ok) { flash((r.data && r.data.error && r.data.error.message) || 'Erro ao enviar.'); return; }
@@ -108,8 +125,8 @@ const app = createApp({
       else flash('Serviço de e-mail não configurado — use "Copiar link" e envie por WhatsApp/e-mail.');
       await refreshDrawer();
     }
-    function isOverdue(t){ return !t.done && t.due_date && t.due_date < new Date().toISOString().slice(0,10); }
-    function isToday(t){ return !t.done && t.due_date === new Date().toISOString().slice(0,10); }
+    function isOverdue(t){ return !t.done && t.due_date && t.due_date < todayBR(); }
+    function isToday(t){ return !t.done && t.due_date === todayBR(); }
     const SRC_COLORS = { site:'#0071E3', checkout:'#34C759', newsletter:'#FF9500', indicacao:'#5E5CE6', outbound:'#FF2D55' };
     function srcColor(k){ return SRC_COLORS[k] || '#86868B'; }
     function barPct(v){ const arr = (S.report && S.report.bySource) || []; const max = Math.max(1, ...arr.map(x=>x.revenue||0)); return Math.round((v/max)*100); }
@@ -151,9 +168,16 @@ const app = createApp({
     }
 
     // ---------- lead drawer ----------
+    // Abre o card já na aba do trabalho pendente daquela etapa (leads fechados vão para a timeline).
+    const STAGE_TAB = { novo_lead:'resumo', triagem:'resumo', aguardando_cotacao:'cotacao',
+      precificacao:'precificacao', proposta_enviada:'proposta', negociacao:'proposta' };
+    function tabForLead(lead){
+      if (lead.status === 'won' || lead.status === 'lost') return 'timeline';
+      return STAGE_TAB[lead.stage] || 'resumo';
+    }
     async function openLead(id){
       const r = await API.get('/api/leads/' + id);
-      if (r.ok) { const keepTab = S.drawer && S.drawer.lead.id === r.data.data.lead.id ? S.drawerTab : 'resumo';
+      if (r.ok) { const keepTab = S.drawer && S.drawer.lead.id === r.data.data.lead.id ? S.drawerTab : tabForLead(r.data.data.lead);
         S.drawer = r.data.data; S.drawerTab = keepTab; S.priceCalc = null;
         const q = S.drawer.quotes[0];
         S.quoteForm = { supplier_id:'', product_id: S.drawer.lead.product_id || '', cost_amount:'', cost_currency:'USD', qty: S.drawer.lead.qty || 1, supplier_ref:'', notes:'' };
@@ -222,7 +246,7 @@ const app = createApp({
 
     const filteredContacts = computed(() => S.newLead.account_id ? S.contacts.filter(c => c.account_id == S.newLead.account_id) : S.contacts);
 
-    return { S, route, go, stageLabel, AREA_LABEL, BRL, PCT, initials, canArea, flash,
+    return { S, route, go, stageLabel, AREA_LABEL, BRL, PCT, initials, canArea, flash, fmtDT, fmtD,
       doLogin, logout, leadsByStage, onDragStart, onDrop, createLead, openLead, closeDrawer,
       triage, toggleHot, addNote, submitQuote, runPricing, savePricing, sendProposal, closeLead,
       toggleTask, toggleTaskRow, updateContract, latestPricing, saveConfig, addSupplier, addProduct, addUser,
