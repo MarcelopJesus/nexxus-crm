@@ -7,6 +7,8 @@ const url = require('url');
 const { verify } = require('./lib/auth');
 const { seedIfEmpty } = require('./lib/seed');
 const { handle } = require('./lib/api');
+const catalog = require('./lib/catalogSync');
+const { runFollowupSweep, autoLostDays } = require('./lib/followups');
 
 const PORT = process.env.PORT || 3001;
 const CLIENT_DIR = path.join(__dirname, '..', 'client');
@@ -81,8 +83,35 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
+// ---- Rotinas de fundo ----
+// Sync do catálogo do site: nunca é fatal — se o site estiver fora, o CRM sobe igual
+// com o último catálogo que já tinha.
+const SYNC_MS = 30 * 60 * 1000;
+function syncCatalogoSeguro() {
+  if (!catalog.isConfigured()) return;
+  catalog.syncCatalog()
+    .then(r => console.log(`[catalogo] sync: ${r.imported} novos, ${r.updated} atualizados, ${r.deactivated} desativados`))
+    .catch(e => console.error('[catalogo] sync falhou (segue com o catálogo atual):', e.message));
+}
+const SWEEP_MS = 60 * 60 * 1000;
+function varreduraSegura() {
+  try {
+    const r = runFollowupSweep();
+    if (r.lost) console.log(`[followup] ${r.lost} lead(s) sem resposta há ${r.days} dias marcados como perdidos`);
+  } catch (e) { console.error('[followup] varredura falhou:', e.message); }
+}
+
 const HOST = process.env.HOST || '0.0.0.0';
 ready.then(() => server.listen(PORT, HOST, () => {
   console.log(`\n  Nexxus CRM rodando em http://localhost:${PORT}`);
   console.log(`  Login demo: joao@nexxustech.one / senha123\n`);
+  if (catalog.isConfigured()) {
+    syncCatalogoSeguro();
+    setInterval(syncCatalogoSeguro, SYNC_MS).unref();
+  } else {
+    console.log('[catalogo] sync desligada — defina SITE_CATALOG_URL e SITE_CATALOG_KEY para ligar');
+  }
+  console.log(`[followup] varredura ativa — lead sem resposta vira perdido em ${autoLostDays()} dias`);
+  varreduraSegura();
+  setInterval(varreduraSegura, SWEEP_MS).unref();
 }));

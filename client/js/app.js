@@ -43,6 +43,7 @@ const app = createApp({
       notif: { items: [], unread: 0 }, showNotif: false,
       newLead: { title:'', account_id:'', contact_id:'', product_id:'', requested_software:'', qty:1, source:'site', notes:'' },
       quoteForm: { supplier_id:'', product_id:'', cost_amount:'', cost_currency:'USD', qty:1, supplier_ref:'', notes:'' },
+      quoteHint: '',
       priceCalc: null, propInput: { final_price:'', approve_below_floor:false }, closeForm:{ result:'', lost_reason:'' },
       noteInput: '', savingPrice:false,
       newSupplier:{ name:'', country:'', currency:'USD' }, newProduct:{ supplier_id:'', name:'', sku:'', list_cost_usd:'' },
@@ -127,6 +128,18 @@ const app = createApp({
     }
     function isOverdue(t){ return !t.done && t.due_date && t.due_date < todayBR(); }
     function isToday(t){ return !t.done && t.due_date === todayBR(); }
+    // Canal que o cliente pediu no site — o vendedor precisa ver antes de escolher como abordar.
+    const CHANNEL_LABEL = { email:'✉️ E-mail', whatsapp:'💬 WhatsApp', telefone:'📞 Telefone' };
+    function channelLabel(c){ return CHANNEL_LABEL[c] || '—'; }
+    // B2C = comprou no checkout; B2B = veio do formulário pedindo cotação.
+    function originBadge(lead){
+      if (!lead) return null;
+      const k = lead.kind || '';
+      if (k==='order' || lead.source==='checkout') return { label:'B2C · checkout', color:'#34C759' };
+      if (k==='newsletter' || lead.source==='newsletter') return { label:'Newsletter', color:'#FF9500' };
+      if (k==='b2b' || lead.source==='site') return { label:'B2B · formulário', color:'#0071E3' };
+      return null;
+    }
     const SRC_COLORS = { site:'#0071E3', checkout:'#34C759', newsletter:'#FF9500', indicacao:'#5E5CE6', outbound:'#FF2D55' };
     function srcColor(k){ return SRC_COLORS[k] || '#86868B'; }
     function barPct(v){ const arr = (S.report && S.report.bySource) || []; const max = Math.max(1, ...arr.map(x=>x.revenue||0)); return Math.round((v/max)*100); }
@@ -175,12 +188,46 @@ const app = createApp({
       if (lead.status === 'won' || lead.status === 'lost') return 'timeline';
       return STAGE_TAB[lead.stage] || 'resumo';
     }
+    // Espelho do pickCostTier do servidor (server/lib/catalogSync.js) — mesmas regras:
+    // só custo em USD; maior faixa que caiba na quantidade; quantidade abaixo da menor
+    // faixa usa a faixa de entrada; empate de quantidade fica com o custo mais alto.
+    function pickCostTier(product, qty){
+      const usd = (Array.isArray(product.cost_tiers) ? product.cost_tiers : [])
+        .filter(t => t && Number(t.unitCostUsd) > 0 && String(t.currency || 'USD').toUpperCase() === 'USD');
+      if (!usd.length) return null;
+      const q = Number(qty) > 0 ? Number(qty) : 1;
+      const extremo = (list, modo) => list.reduce((melhor, t) => {
+        const tq = Number(t.quantity)||1, mq = Number(melhor.quantity)||1;
+        if (tq === mq) return Number(t.unitCostUsd) > Number(melhor.unitCostUsd) ? t : melhor;
+        return (modo === 'max' ? tq > mq : tq < mq) ? t : melhor;
+      });
+      const cabe = usd.filter(t => (Number(t.quantity)||1) <= q);
+      return cabe.length ? extremo(cabe, 'max') : extremo(usd, 'min');
+    }
+    function catalogCost(productId, qty){
+      const p = productId ? S.products.find(x => x.id == productId) : null;
+      if (!p) return null;
+      const tier = pickCostTier(p, qty);
+      const amount = tier ? Number(tier.unitCostUsd) : (Number(p.list_cost_usd) || null);
+      if (!amount) return null;
+      return { amount, currency: tier ? 'USD' : (p.currency || 'USD'), synced_at: p.synced_at || null };
+    }
+    // Produto ou quantidade mudou no formulário: o custo pré-preenchido precisa mudar
+    // junto, senão dá para salvar o produto B com o custo que veio do A.
+    function aplicaCustoCatalogo(){
+      const cc = catalogCost(S.quoteForm.product_id, S.quoteForm.qty);
+      S.quoteForm.cost_amount = cc ? cc.amount : '';
+      S.quoteForm.cost_currency = cc ? cc.currency : 'USD';
+      S.quoteHint = !cc ? '' : (cc.synced_at ? 'custo do catálogo do site (sincronizado ' + fmtDT(cc.synced_at) + ')' : 'custo de tabela do produto');
+    }
+    watch(() => [S.quoteForm.product_id, S.quoteForm.qty].join('|'), () => { if (S.drawer) aplicaCustoCatalogo(); });
     async function openLead(id){
       const r = await API.get('/api/leads/' + id);
       if (r.ok) { const keepTab = S.drawer && S.drawer.lead.id === r.data.data.lead.id ? S.drawerTab : tabForLead(r.data.data.lead);
         S.drawer = r.data.data; S.drawerTab = keepTab; S.priceCalc = null;
-        const q = S.drawer.quotes[0];
-        S.quoteForm = { supplier_id:'', product_id: S.drawer.lead.product_id || '', cost_amount:'', cost_currency:'USD', qty: S.drawer.lead.qty || 1, supplier_ref:'', notes:'' };
+        S.quoteForm = { supplier_id:'', product_id: S.drawer.lead.product_id || '', cost_amount:'',
+          cost_currency:'USD', qty: S.drawer.lead.qty || 1, supplier_ref:'', notes:'' };
+        aplicaCustoCatalogo();
         S.propInput = { final_price:'', approve_below_floor:false }; S.closeForm = { result:'', lost_reason:'' };
       }
     }
@@ -252,6 +299,7 @@ const app = createApp({
       toggleTask, toggleTaskRow, updateContract, latestPricing, saveConfig, addSupplier, addProduct, addUser,
       loadReport, loadTasks, loadUsers, filteredContacts,
       loadNotifications, markNotifRead, propLink, propStatusLabel, copyText, copyProposal, openProposal, sendPropEmail, isOverdue, isToday, srcColor, barPct,
+      channelLabel, originBadge,
       loadProspects, runResearch, importProspect, discardProspect, generateOutreach, runQualify, tierColor, fitColor };
   },
   template: APP_TEMPLATE(),

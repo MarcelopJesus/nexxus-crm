@@ -359,10 +359,15 @@ function DRAWER_TEMPLATE() { return `
           </div>
         </div>
         <div class="row2">
-          <div class="card card-p"><div class="section-title">Dados do lead</div>
+          <div class="card card-p">
+            <div class="flex center gap" style="margin-bottom:6px">
+              <div class="section-title" style="margin:0">Dados do lead</div>
+              <span v-if="originBadge(S.drawer.lead)" class="badge" :style="{background: originBadge(S.drawer.lead).color, color:'#fff'}">{{ originBadge(S.drawer.lead).label }}</span>
+            </div>
             <p class="small"><b>Software:</b> {{ S.drawer.lead.requested_software || '—' }}</p>
             <p class="small"><b>Produto:</b> {{ S.drawer.lead.product_name || '—' }}</p>
             <p class="small"><b>Quantidade:</b> {{ S.drawer.lead.qty }}</p>
+            <p class="small"><b>Canal preferido:</b> {{ channelLabel(S.drawer.lead.preferred_channel) }}</p>
             <p class="small"><b>Origem:</b> {{ S.drawer.lead.source }}</p>
             <p class="small"><b>Responsável:</b> {{ S.drawer.lead.owner_name || '—' }}</p>
             <p class="small"><b>Valor estimado:</b> {{ S.drawer.lead.estimated_value ? BRL(S.drawer.lead.estimated_value) : '—' }}</p>
@@ -468,7 +473,8 @@ function DRAWER_TEMPLATE() { return `
             <div class="field"><label>Produto</label><select v-model="S.quoteForm.product_id"><option value="">—</option><option v-for="p in S.products" :value="p.id">{{ p.name }}</option></select></div>
           </div>
           <div class="row3">
-            <div class="field"><label>Custo</label><input v-model.number="S.quoteForm.cost_amount" type="number" step="0.01" placeholder="1000.00"/></div>
+            <div class="field"><label>Custo</label><input v-model.number="S.quoteForm.cost_amount" type="number" step="0.01" placeholder="1000.00"/>
+              <span v-if="S.quoteHint" class="small muted">{{ S.quoteHint }}</span></div>
             <div class="field"><label>Moeda</label><select v-model="S.quoteForm.cost_currency"><option>USD</option><option>EUR</option><option>BRL</option></select></div>
             <div class="field"><label>Quantidade</label><input v-model.number="S.quoteForm.qty" type="number"/></div>
           </div>

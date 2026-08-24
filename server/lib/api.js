@@ -6,6 +6,7 @@ const { getUsdBrl } = require('./fx');
 const { calculatePricing } = require('./pricing');
 const { sendEmail, isConfigured } = require('./mailer');
 const sdr = require('./sdr');
+const catalog = require('./catalogSync');
 const S = store; // alias
 
 const STAGES = [
@@ -31,6 +32,15 @@ function pickOwner(){
   S.data.rr = ((S.data.rr||0) + 1); return vend[S.data.rr % vend.length].id;
 }
 function makeToken(){ return require('crypto').randomBytes(16).toString('hex'); }
+// Vencimento de tarefa no fuso de Brasília: depois das 21h o UTC já virou o dia e o
+// D+1 aparecia como D+2 para quem olha a tela.
+function dueIn(days){ return new Date(Date.now() + days*86400000).toLocaleDateString('en-CA', { timeZone:'America/Sao_Paulo' }); }
+// Inteiro estrito e positivo — '12abc' e 3.9 não viram quantidade.
+function intPositivo(v, padrao){
+  if (v === null || v === undefined || v === '') return padrao;
+  const n = Number(v);
+  return Number.isInteger(n) && n > 0 ? n : padrao;
+}
 function baseUrl(req){
   if (process.env.BASE_URL) return process.env.BASE_URL.replace(/\/$/,'');
   const h = req.headers||{};
@@ -153,6 +163,15 @@ async function handle(req) {
         } } };
       }
     }
+    // Campos novos do site (todos opcionais — sem eles o intake é o de antes).
+    const slug = String(body.productSlug || '').trim();
+    const prod = slug ? S.findOne('products', p => String(p.sku||'').toLowerCase() === slug.toLowerCase()) : null;
+    const qtyNum = intPositivo(body.quantity, 1);
+    // O site manda 'phone'; dentro do CRM a etiqueta é 'telefone'. Normaliza na porta
+    // de entrada para não existirem dois nomes para o mesmo canal.
+    const CANAIS = { email:'email', whatsapp:'whatsapp', phone:'telefone', telefone:'telefone' };
+    const preferredChannel = CANAIS[String(body.preferredChannel || '').trim().toLowerCase()] || null;
+
     let valueNum = 0;
     if (body.value != null && !isNaN(parseFloat(body.value))) valueNum = parseFloat(body.value);
     else if (cf.valor) valueNum = parseFloat(String(cf.valor).replace(/[^0-9.,]/g,'').replace(/\.(?=\d{3})/g,'').replace(',','.')) || 0;
@@ -176,9 +195,9 @@ async function handle(req) {
 
     if (kind==='order') {
       const items = cf.itens || '';
-      const lead = S.insert('leads', { title: 'Pedido pago — '+companyName, account_id:acc.id, contact_id:ct.id, product_id:null,
+      const lead = S.insert('leads', { title: 'Pedido pago — '+companyName, account_id:acc.id, contact_id:ct.id, product_id: prod?prod.id:null,
         requested_software: items||message, source:'checkout', stage:'proposta_enviada', owner_id:owner, hot:0,
-        status:'won', lost_reason:null, estimated_value: valueNum||null, qty:1,
+        status:'won', lost_reason:null, estimated_value: valueNum||null, qty:qtyNum, kind, preferred_channel:preferredChannel,
         notes: 'Pedido pago via site'+(cf.pedido_id?(' (#'+cf.pedido_id+')'):'')+(items?('\nItens: '+items):''), updated_at:S.now() });
       log(lead.id, owner, 'close', 'Pedido pago no site — negócio GANHO'+(cf.pedido_id?(' (pedido #'+cf.pedido_id+')'):'')+'. Valor R$ '+valueNum.toLocaleString('pt-BR')+'.');
       notify('order_paid', `Pedido pago no site: ${companyName} — R$ ${valueNum.toLocaleString('pt-BR')}.`, lead.id);
@@ -186,9 +205,10 @@ async function handle(req) {
     }
 
     const lead = S.insert('leads', { title: companyName+' — '+(kind==='newsletter'?'Newsletter':(message?String(message).slice(0,40):'Consulta do site')),
-      account_id:acc.id, contact_id:ct.id, product_id:null, requested_software:message,
+      account_id:acc.id, contact_id:ct.id, product_id: prod?prod.id:null, requested_software:message||(prod?prod.name:null),
       source:(kind==='newsletter'?'newsletter':'site'), stage:'novo_lead', owner_id:owner, hot:0, status:'open',
-      lost_reason:null, estimated_value:null, qty:1, notes:(message||'')+(protocol?('\nProtocolo site: '+protocol):''), updated_at:S.now() });
+      lost_reason:null, estimated_value:null, qty:qtyNum, kind, preferred_channel:preferredChannel,
+      notes:(message||'')+(protocol?('\nProtocolo site: '+protocol):''), updated_at:S.now() });
     log(lead.id, owner, 'note', 'Lead capturado automaticamente do site'+(protocol?(' (protocolo '+protocol+')'):'')+'.');
     notify('lead_new', `Novo lead do site: ${companyName} — atribuído a ${ownerName||'—'}.`, lead.id);
     return { status:201, body:{ success:true, data:{ id:lead.id, owner_id:owner, kind } } };
@@ -328,7 +348,7 @@ async function handle(req) {
     S.update('leads', id, { stage:'aguardando_cotacao', status:'open', updated_at:S.now() });
     const lead = leadWithJoins(id);
     const compras = S.findOne('users', u=>u.area==='compras' && u.active);
-    S.insert('tasks', { lead_id:id, title:'Solicitar cotação ao fabricante: '+(lead.requested_software||lead.title), type:'quote_request', area:'compras', assignee_id:compras?compras.id:null, due_date:new Date(Date.now()+2*86400000).toISOString().slice(0,10), done:0 });
+    S.insert('tasks', { lead_id:id, title:'Solicitar cotação ao fabricante: '+(lead.requested_software||lead.title), type:'quote_request', area:'compras', assignee_id:compras?compras.id:null, due_date:dueIn(2), done:0 });
     log(id, user.id, 'triage', 'Demanda validada e despachada para Compras (aguardando cotação).');
     return { status:200, body:{ success:true, data: lead } };
   }
@@ -448,7 +468,7 @@ async function handle(req) {
       if (q.tier==='A' && !lead.hot) S.update('leads', id, { hot:1 });
       (q.next_actions||[]).slice(0,3).forEach((na,i)=>{
         S.insert('tasks', { lead_id:id, title:'[SDR] '+na, type:'sdr_action', area:'vendas', assignee_id:lead.owner_id||user.id,
-          due_date:new Date(Date.now()+(i+1)*86400000).toISOString().slice(0,10), done:0 });
+          due_date:dueIn(i+1), done:0 });
       });
       log(id, user.id, 'sdr', 'SDR Agent qualificou a conta (BANT): '+q.total_score+'/100 — Tier '+q.tier+'. '+q.summary);
       notify('sdr_qualify', `SDR Agent: ${lead.account_name||lead.title} qualificado — ${q.total_score}/100 (Tier ${q.tier}).`, id);
@@ -516,9 +536,11 @@ async function handle(req) {
       token:makeToken(), viewed_at:null, accepted_at:null, rejected_at:null, reject_reason:null,
       view_count:0, last_viewed_at:null, created_by:user.id });
     S.update('leads', leadId, { stage:'proposta_enviada', estimated_value:finalPrice, updated_at:S.now() });
-    for (const d of [3,7,15])
-      S.insert('tasks', { lead_id:leadId, title:`Follow-up proposta v${last+1} (D+${d})`, type:'followup', area:'vendas', assignee_id:user.id, due_date:new Date(Date.now()+d*86400000).toISOString().slice(0,10), done:0 });
-    log(leadId, user.id, 'proposal', `Proposta v${last+1} enviada — R$ ${fmt(finalPrice)}${below?' (ABAIXO do piso, aprovada)':''}. Follow-ups agendados (D+3/7/15).`);
+    // D+1 e D+2 são as janelas de 24h/48h combinadas na reunião: quem não responde
+    // em dois dias raramente responde no terceiro.
+    for (const d of [1,2,7,15])
+      S.insert('tasks', { lead_id:leadId, title:`Follow-up proposta v${last+1} (D+${d})`, type:'followup', area:'vendas', assignee_id:user.id, due_date:dueIn(d), done:0 });
+    log(leadId, user.id, 'proposal', `Proposta v${last+1} enviada — R$ ${fmt(finalPrice)}${below?' (ABAIXO do piso, aprovada)':''}. Follow-ups agendados (D+1/2/7/15).`);
     return { status:201, body:{ success:true, data: row } };
   }
 
@@ -575,6 +597,18 @@ async function handle(req) {
   if (method==='POST' && path==='/api/activities') { log(body.lead_id, user.id, 'note', body.message); return { status:201, body:{ success:true } }; }
 
   // ---- Catálogo / contas ----
+  // Sync manual com o catálogo do site (o automático roda no boot e a cada 30 min).
+  if (method==='POST' && path==='/api/catalog/sync') {
+    if (!catalog.isConfigured())
+      return { status:503, body:{ success:false, error:{ message:'Sync do catálogo desligada — defina SITE_CATALOG_URL e SITE_CATALOG_KEY no servidor.' } } };
+    try {
+      const r = await catalog.syncCatalog();
+      log(null, user.id, 'catalog', `Catálogo do site sincronizado: ${r.imported} novos, ${r.updated} atualizados, ${r.deactivated} desativados.`);
+      return { status:200, body:{ success:true, data:{ imported:r.imported, updated:r.updated, deactivated:r.deactivated } } };
+    } catch (e) {
+      return { status:502, body:{ success:false, error:{ message:'Falha ao ler o catálogo do site: '+e.message } } };
+    }
+  }
   if (method==='GET' && path==='/api/accounts') return okList(S.all('accounts').sort(byName));
   if (method==='GET' && path==='/api/contacts') { const am=byId('accounts'); return okList(S.all('contacts').sort(byName).map(c=>Object.assign({}, c, { account_name:c.account_id&&am[c.account_id]?am[c.account_id].name:null }))); }
   if (method==='GET' && path==='/api/suppliers') return okList(S.all('suppliers').sort(byName));
@@ -639,4 +673,5 @@ function byName(a,b){ return String(a.name||'').localeCompare(String(b.name||'')
 function byCreatedDesc(a,b){ return String(b.created_at||'').localeCompare(String(a.created_at||'')) || (b.id-a.id); }
 function fmt(n){ return Number(n||0).toLocaleString('pt-BR',{minimumFractionDigits:2, maximumFractionDigits:2}); }
 
-module.exports = { handle };
+// log/notify saem daqui para o followups.js escrever timeline e sino no mesmo formato.
+module.exports = { handle, log, notify };
