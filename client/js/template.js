@@ -39,6 +39,9 @@ function APP_TEMPLATE() { return `
     <div class="nav-item" :class="{active: route==='/funil'}" @click="go('/funil')"><span class="ic">▤</span> Funil de Vendas</div>
     <div class="nav-item" :class="{active: route==='/tarefas'}" @click="go('/tarefas'); loadTasks()"><span class="ic">✓</span> Tarefas & Follow-up</div>
     <div class="nav-item" :class="{active: route==='/sdr'}" @click="go('/sdr'); loadProspects()"><span class="ic">⚡</span> SDR Agent</div>
+    <div class="nav-item" v-if="canArea('vendas')" :class="{active: route==='/bdr'}" @click="go('/bdr'); loadBdr()"><span class="ic">◈</span> BDR
+      <span v-if="S.bdr.count" style="margin-left:auto;background:var(--nx-hot);color:#fff;border-radius:999px;font-size:10.5px;padding:1px 7px;font-weight:700">{{ S.bdr.count }}</span>
+    </div>
     <div class="nav-group">Administração</div>
     <div class="nav-item" :class="{active: route==='/config'}" @click="go('/config')"><span class="ic">⚙</span> Catálogo & Regras</div>
     <div class="nav-item" :class="{active: route==='/usuarios'}" @click="go('/usuarios'); loadUsers()"><span class="ic">◔</span> Usuários</div>
@@ -53,6 +56,7 @@ function APP_TEMPLATE() { return `
         <template v-else-if="route==='/funil'">Funil de Vendas</template>
         <template v-else-if="route==='/tarefas'">Tarefas & Follow-up</template>
         <template v-else-if="route==='/sdr'">SDR Agent — Prospecção Inteligente</template>
+        <template v-else-if="route==='/bdr'">BDR — Decisões do Agente Nexus</template>
         <template v-else-if="route==='/config'">Catálogo & Regras de Precificação</template>
         <template v-else-if="route==='/usuarios'">Usuários & Permissões</template>
       </h1>
@@ -64,8 +68,9 @@ function APP_TEMPLATE() { return `
           </button>
           <div v-if="S.showNotif" style="position:absolute;right:0;top:44px;width:330px;background:#fff;border:1px solid var(--nx-border);border-radius:14px;box-shadow:var(--nx-shadow-lg);z-index:60;max-height:400px;overflow:auto">
             <div style="padding:12px 14px;font-weight:700;border-bottom:1px solid var(--nx-border)">Notificações</div>
-            <div v-for="n in S.notif.items" :key="n.id" style="padding:11px 14px;border-bottom:1px solid var(--nx-border);font-size:13px" @click="n.lead_id && openLead(n.lead_id); S.showNotif=false" :style="{cursor: n.lead_id?'pointer':'default'}">
-              <div>{{ n.message }}</div><div class="muted" style="font-size:11.5px;margin-top:2px">{{ fmtDT(n.created_at) }}</div>
+            <div v-for="n in S.notif.items" :key="n.id" style="padding:11px 14px;border-bottom:1px solid var(--nx-border);font-size:13px" @click="n.lead_id && openLead(n.lead_id); S.showNotif=false"
+              :style="{cursor: n.lead_id?'pointer':'default', borderLeft: n.type==='bdr_action' ? '3px solid var(--nx-hot)' : '3px solid transparent', background: n.type==='bdr_action' ? '#fff8e6' : 'transparent'}">
+              <div><span v-if="n.type==='bdr_action'" style="font-weight:700">◈ BDR · </span>{{ n.message }}</div><div class="muted" style="font-size:11.5px;margin-top:2px">{{ fmtDT(n.created_at) }}</div>
             </div>
             <p v-if="!S.notif.items.length" class="muted small" style="padding:16px">Nenhuma notificação ainda.</p>
           </div>
@@ -239,6 +244,69 @@ function APP_TEMPLATE() { return `
         </div>
       </div>
 
+      <!-- ===== BDR — o que o agente Nexus não resolveu sozinho ===== -->
+      <div v-else-if="route==='/bdr'">
+        <div class="card card-p mb">
+          <div class="flex between center">
+            <div>
+              <div class="section-title" style="margin:0">Fila de decisões</div>
+              <p class="small muted" style="margin:4px 0 0">O agente trabalha o funil sozinho e só chama você quando não sabe responder ou o pedido foge do padrão. Escolha uma resposta pronta, edite se quiser e mande.</p>
+            </div>
+            <span class="chip" v-if="S.sdr.agent_enabled">agente ativo · {{ S.sdr.model }}</span>
+            <span class="chip" v-else style="background:#fff8e6;border-color:#f0c36d">agente desligado: {{ S.sdr.agent_off_reason }}</span>
+          </div>
+        </div>
+
+        <div v-for="l in S.bdr.items" :key="l.id" class="card card-p mb">
+          <div class="flex between center">
+            <div>
+              <div class="flex center gap">
+                <b style="font-size:16px">{{ l.account_name || l.title }}</b>
+                <span class="stage-pill" :style="{background:'var(--st-'+l.stage+')'}">{{ stageLabel(l.stage) }}</span>
+                <span class="chip">{{ maskLabel(l.bdr_mask) }}</span>
+                <span v-if="l.bdr_hold" class="badge" style="background:#FF9500;color:#fff">HOLD</span>
+              </div>
+              <div class="muted small" style="margin-top:4px">{{ l.bdr_summary }}</div>
+              <div class="muted" style="font-size:11.5px;margin-top:3px">
+                {{ l.contact_name }} · {{ l.contact_email || 'sem e-mail' }} · {{ l.requested_software || l.product_name || '—' }} · {{ l.qty }} licença(s) · {{ fmtDT(l.bdr_at) }}
+              </div>
+            </div>
+            <button class="btn btn-ghost btn-sm" @click="openLead(l.id)">Abrir lead</button>
+          </div>
+
+          <div class="mt">
+            <div class="section-title" style="font-size:13px">Respostas recomendadas (clique para usar)</div>
+            <div v-for="(op,i) in l.bdr_options" :key="i" @click="useBdrOption(l, op)"
+              style="border:1px solid var(--nx-border);border-radius:10px;padding:10px 12px;margin-bottom:7px;cursor:pointer;font-size:13px;line-height:1.5"
+              :style="{borderColor: S.bdrDraft[l.id]===op ? 'var(--nx-primary)' : 'var(--nx-border)', background: S.bdrDraft[l.id]===op ? 'rgba(0,113,227,.05)' : '#fff'}">
+              <b class="muted" style="font-size:11px">Opção {{ i+1 }}</b><div>{{ op }}</div>
+            </div>
+            <p v-if="!l.bdr_options.length" class="small muted">O agente não sugeriu respostas neste caso — escreva a sua abaixo.</p>
+          </div>
+
+          <div class="field mt">
+            <label>Resposta que vai para o cliente (edite à vontade)</label>
+            <textarea v-model="S.bdrDraft[l.id]" rows="5" placeholder="Escolha uma opção acima ou escreva aqui…"
+              style="width:100%;padding:10px;border:1px solid var(--nx-border);border-radius:8px;font-family:inherit;font-size:13px"></textarea>
+          </div>
+
+          <div v-if="S.bdrAskLost===l.id" class="field">
+            <label>Motivo da perda</label>
+            <input v-model="S.bdrLost[l.id]" placeholder="Ex.: preço acima do orçamento, escolheu concorrente…"/>
+          </div>
+
+          <div class="flex gap wrap mt">
+            <button class="btn" @click="resolveBdr(l,'yes')" :disabled="S.bdrBusy===l.id">✓ Sim — enviar e avançar</button>
+            <button class="btn btn-ghost" v-if="S.bdrAskLost!==l.id" @click="S.bdrAskLost=l.id">✕ Não</button>
+            <button class="btn btn-ghost" v-else @click="resolveBdr(l,'no')" :disabled="S.bdrBusy===l.id" style="border-color:var(--nx-danger);color:var(--nx-danger)">Confirmar perda</button>
+            <button class="btn btn-ghost" @click="resolveBdr(l,'hold')" :disabled="S.bdrBusy===l.id">⏸ Hold</button>
+            <span v-if="!l.contact_email" class="small muted" style="align-self:center">Sem e-mail do contato — a resposta não sai automática.</span>
+          </div>
+        </div>
+
+        <div v-if="!S.bdr.items.length" class="card card-p muted">Nada pendente. O agente está dando conta do funil sozinho.</div>
+      </div>
+
       <!-- ===== CONFIG / CATÁLOGO ===== -->
       <div v-else-if="route==='/config'">
         <div class="row2">
@@ -342,6 +410,7 @@ function DRAWER_TEMPLATE() { return `
         <div class="tab" :class="{active:S.drawerTab==='cotacao'}" @click="S.drawerTab='cotacao'">Cotação</div>
         <div class="tab" :class="{active:S.drawerTab==='precificacao'}" @click="S.drawerTab='precificacao'">Precificação</div>
         <div class="tab" :class="{active:S.drawerTab==='proposta'}" @click="S.drawerTab='proposta'">Proposta</div>
+        <div class="tab" :class="{active:S.drawerTab==='email'}" @click="S.drawerTab='email'">✉️ E-mail</div>
         <div class="tab" :class="{active:S.drawerTab==='fechamento'}" @click="S.drawerTab='fechamento'">Fechamento</div>
         <div class="tab" :class="{active:S.drawerTab==='timeline'}" @click="S.drawerTab='timeline'">Timeline</div>
       </div>
@@ -350,13 +419,25 @@ function DRAWER_TEMPLATE() { return `
 
       <!-- RESUMO / TRIAGEM -->
       <div v-if="S.drawerTab==='resumo'">
+        <!-- Aguardando decisão do BDR: bloco discreto, o trabalho de verdade é na página BDR -->
+        <div v-if="S.drawer.lead.needs_bdr" class="card card-p mb" style="border-color:#f0c36d;background:#fff8e6">
+          <div class="flex between center">
+            <div>
+              <b>{{ maskLabel(S.drawer.lead.bdr_mask) }} pediu uma decisão sua.</b>
+              <div class="small" style="margin-top:3px">{{ S.drawer.lead.bdr_summary }}</div>
+            </div>
+            <button class="btn btn-sm" @click="closeDrawer(); go('/bdr'); loadBdr()">Resolver no BDR</button>
+          </div>
+        </div>
         <div class="card card-p mb">
           <div class="section-title">Triagem (Vendas / Pré-vendas)</div>
           <p class="small muted" style="margin-top:-6px">Valide a demanda e despache para Compras com 1 clique.</p>
           <div class="flex gap wrap">
             <button class="btn" v-if="['novo_lead','triagem'].includes(S.drawer.lead.stage)" @click="triage">➜ Validar e despachar para Compras</button>
             <button class="btn btn-ghost" @click="toggleHot">{{ S.drawer.lead.hot ? 'Desmarcar quente' : '🔥 Marcar como quente' }}</button>
+            <button class="btn btn-ghost" @click="toggleAgentPause">{{ S.drawer.lead.agent_paused ? '▶ Retomar agente' : '⏸ Pausar agente' }}</button>
           </div>
+          <p v-if="S.drawer.lead.agent_paused" class="small muted" style="margin-bottom:0">Agente pausado: este lead só anda na mão.</p>
         </div>
         <div class="row2">
           <div class="card card-p">
@@ -541,6 +622,28 @@ function DRAWER_TEMPLATE() { return `
               <div class="muted" style="font-size:11px" v-if="p.rejected_at">recusada {{ fmtDT(p.rejected_at) }}<span v-if="p.reject_reason"> · {{ p.reject_reason }}</span></div></td>
             <td><div class="flex gap wrap"><button class="btn btn-ghost btn-sm" @click="copyProposal(p)">Copiar link</button><button class="btn btn-ghost btn-sm" @click="openProposal(p)" title="Abre em modo preview — não conta como abertura do cliente">Abrir (preview)</button><button class="btn btn-sm" @click="sendPropEmail(p)">Enviar e-mail</button></div></td>
           </tr></tbody></table>
+        </div>
+      </div>
+
+      <!-- E-MAIL — a conversa com o cliente (Patrícia envia, cliente responde) -->
+      <div v-if="S.drawerTab==='email'">
+        <div class="card card-p">
+          <div class="flex between center">
+            <div class="section-title" style="margin:0">Conversa por e-mail</div>
+            <span class="chip">{{ S.drawer.lead.contact_email || 'contato sem e-mail' }}</span>
+          </div>
+          <div v-for="a in emailThread" :key="a.id" style="margin-top:12px;display:flex"
+            :style="{justifyContent: a.type==='email_out' ? 'flex-end' : 'flex-start'}">
+            <div style="max-width:78%;border-radius:14px;padding:11px 14px;font-size:13px;line-height:1.55"
+              :style="{background: a.type==='email_out' ? 'rgba(0,113,227,.08)' : 'var(--nx-bg, #f5f5f7)', border:'1px solid var(--nx-border)'}">
+              <div class="muted" style="font-size:11px;font-weight:700;margin-bottom:4px">
+                {{ a.type==='email_out' ? 'Patrícia · Nexxus Tech' : (a.email_from || 'Cliente') }} · {{ fmtDT(a.created_at) }}
+              </div>
+              <div v-if="a.email_subject" style="font-weight:600;margin-bottom:4px">{{ a.email_subject }}</div>
+              <div style="white-space:pre-wrap">{{ a.email_body || a.message }}</div>
+            </div>
+          </div>
+          <p v-if="!emailThread.length" class="small muted mt">Nenhum e-mail trocado ainda. Tudo que a Patrícia enviar e tudo que o cliente responder aparece aqui.</p>
         </div>
       </div>
 

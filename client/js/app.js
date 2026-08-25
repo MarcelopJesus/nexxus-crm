@@ -49,7 +49,9 @@ const app = createApp({
       newSupplier:{ name:'', country:'', currency:'USD' }, newProduct:{ supplier_id:'', name:'', sku:'', list_cost_usd:'' },
       newUser:{ name:'', email:'', password:'senha123', area:'vendas', role:'user' },
       // SDR Agent
-      sdr: { configured:false, model:'' },
+      sdr: { configured:false, model:'', agent_enabled:false, agent_off_reason:null },
+      // BDR — fila de decisões que o agente Nexus não resolveu sozinho
+      bdr: { items:[], count:0 }, bdrDraft:{}, bdrLost:{}, bdrBusy:null, bdrAskLost:null,
       icp: { segment:'', size:'', region:'', software:'', notes:'', quantity: 8 },
       prospects: [], researching:false, importingId:null,
       genOutreach:false, genQualify:false, outreachTab:'email',
@@ -65,7 +67,7 @@ const app = createApp({
       const me = await API.get('/api/auth/me');
       if (!me.ok) { S.ready = true; return; }
       S.user = me.data.data.user;
-      await Promise.all([loadMeta(), loadFx(), loadLeads(), loadCatalog(), loadConfig(), loadNotifications(), loadSdrStatus()]);
+      await Promise.all([loadMeta(), loadFx(), loadLeads(), loadCatalog(), loadConfig(), loadNotifications(), loadSdrStatus(), loadBdr()]);
       S.ready = true;
     }
     async function loadMeta(){ const r = await API.get('/api/meta'); if (r.ok) S.meta = r.data.data; }
@@ -78,6 +80,53 @@ const app = createApp({
     async function loadNotifications(){ const r = await API.get('/api/notifications'); if (r.ok) S.notif = r.data.data; }
     // ---------- SDR Agent ----------
     async function loadSdrStatus(){ const r = await API.get('/api/sdr/status'); if (r.ok) S.sdr = r.data.data; }
+    // ---------- BDR ----------
+    async function loadBdr(){
+      // A fila é de Vendas/Admin: para os outros a rota responde 403 e não há o que mostrar.
+      if (!canArea('vendas')) return;
+      const r = await API.get('/api/bdr');
+      if (!r.ok) return;
+      S.bdr = r.data.data;
+      // Mantém o que o BDR já estava escrevendo; só cria rascunho para card novo.
+      S.bdr.items.forEach(l => { if (S.bdrDraft[l.id] === undefined) S.bdrDraft[l.id] = ''; });
+    }
+    function useBdrOption(lead, opt){ S.bdrDraft[lead.id] = opt; }
+    async function resolveBdr(lead, decision){
+      if (S.bdrBusy) return;
+      const payload = { decision };
+      if (decision === 'yes') {
+        const msg = (S.bdrDraft[lead.id] || '').trim() || lead.bdr_options[0] || '';
+        if (!msg) { flash('Escolha ou escreva a resposta que vai para o cliente.'); return; }
+        payload.message = msg;
+      }
+      if (decision === 'no') {
+        payload.lost_reason = (S.bdrLost[lead.id] || '').trim();
+        if (!payload.lost_reason) { flash('Informe o motivo da perda.'); return; }
+      }
+      S.bdrBusy = lead.id;
+      const r = await API.post('/api/bdr/' + lead.id + '/resolve', payload);
+      S.bdrBusy = null;
+      if (!r.ok) { flash((r.data && r.data.error && r.data.error.message) || 'Erro ao resolver.'); return; }
+      if (decision === 'yes') flash(r.data.data.emailed ? 'Resposta enviada — lead devolvido ao agente.' : 'Lead devolvido ao agente, mas o e-mail NÃO saiu: envie manualmente.');
+      else if (decision === 'no') flash('Negócio marcado como perdido.');
+      else flash('Caso segurado (hold).');
+      S.bdrAskLost = null; delete S.bdrDraft[lead.id]; delete S.bdrLost[lead.id];
+      await Promise.all([loadBdr(), loadLeads(), loadNotifications()]);
+    }
+    async function toggleAgentPause(){
+      const r = await API.post('/api/leads/' + S.drawer.lead.id + '/agent-pause', {});
+      if (r.ok) flash(r.data.data.agent_paused ? 'Agente pausado neste lead.' : 'Agente retomado neste lead.');
+      await refreshDrawer();
+    }
+    const MASK_LABEL = { sdr:'Nexus·SDR', comprador:'Nexus·Comprador', vendedor:'Nexus·Vendedor' };
+    function maskLabel(k){ return MASK_LABEL[k] || 'Nexus'; }
+    // Aba E-mail do drawer: só as atividades da conversa, em ordem cronológica.
+    const emailThread = computed(() => {
+      if (!S.drawer) return [];
+      return (S.drawer.activities || [])
+        .filter(a => a.type === 'email_in' || a.type === 'email_out')
+        .slice().reverse();
+    });
     async function loadProspects(){ const r = await API.get('/api/sdr/prospects'); if (r.ok) S.prospects = r.data.data; }
     async function runResearch(){
       if (S.researching) return; S.researching = true;
@@ -284,12 +333,14 @@ const app = createApp({
       if (r === '/tarefas') loadTasks();
       if (r === '/usuarios') loadUsers();
       if (r === '/sdr') loadProspects();
+      if (r === '/bdr') loadBdr();
     }, { immediate: false });
 
     onMounted(async () => { await bootstrap(); if ((route.value === '/' || route.value === '/dashboard') && S.user) loadReport(); });
     // FX auto-refresh a cada 5 min
     setInterval(() => { if (S.user) loadFx(); }, 300000);
-    setInterval(() => { if (S.user) loadNotifications(); }, 30000);
+    // O sino e a fila do BDR andam juntos: o badge do menu não pode ficar velho.
+    setInterval(() => { if (S.user) { loadNotifications(); loadBdr(); } }, 30000);
 
     const filteredContacts = computed(() => S.newLead.account_id ? S.contacts.filter(c => c.account_id == S.newLead.account_id) : S.contacts);
 
@@ -300,7 +351,8 @@ const app = createApp({
       loadReport, loadTasks, loadUsers, filteredContacts,
       loadNotifications, markNotifRead, propLink, propStatusLabel, copyText, copyProposal, openProposal, sendPropEmail, isOverdue, isToday, srcColor, barPct,
       channelLabel, originBadge,
-      loadProspects, runResearch, importProspect, discardProspect, generateOutreach, runQualify, tierColor, fitColor };
+      loadProspects, runResearch, importProspect, discardProspect, generateOutreach, runQualify, tierColor, fitColor,
+      loadBdr, useBdrOption, resolveBdr, toggleAgentPause, maskLabel, emailThread };
   },
   template: APP_TEMPLATE(),
 });

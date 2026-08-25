@@ -112,3 +112,56 @@ curl -X POST https://crm.nexxustech.one/api/public/leads \
 ```
 
 Depois, abra o CRM: o lead estará em **Novo Lead** e o sino de notificações mostrará o aviso.
+
+---
+
+# Agente Nexus e Patrícia (e-mail) — o que o deploy precisa saber
+
+## Réplica única (importante)
+
+O agente foi desenhado para **uma instância só**. As travas que impedem trabalho duplicado —
+lock por lead, varredura única, limitadores de taxa do inbound e cache do token do Vertex —
+vivem **em memória do processo**. Com duas réplicas, cada uma teria o seu conjunto e o mesmo
+lead poderia receber dois e-mails, duas cotações ou duas propostas.
+
+**Produção roda `replicas: 1`.** Se um dia precisar escalar horizontalmente, essas travas têm
+de virar lock no Postgres (ou Redis) antes — não é só subir o número de réplicas.
+
+## Piloto automático é opt-in
+
+O agente **só liga com `AGENT_AUTOPILOT=on`**. Env ausente, vazia ou com qualquer outro valor
+deixa tudo desligado (fail-closed): o CRM funciona normalmente, na mão, como antes. O log de
+boot diz em qual estado subiu.
+
+## Webhook de e-mail recebido (Resend Inbound)
+
+Aponte o Resend para `POST https://crm.nexxustech.one/api/public/email/inbound`, com o segredo
+do endpoint em `EMAIL_WEBHOOK_SECRET`. A rota:
+
+- exige `Content-Type: application/json` e corpo de no máximo 1 MB;
+- exige `EMAIL_WEBHOOK_SECRET` **e** `EMAIL_INBOUND_ADDRESS` configuradas (sem qualquer uma delas: 503);
+- confere a assinatura Svix sobre o **corpo cru** e rejeita timestamp fora de ±5 min;
+- ignora (respondendo 200) evento que não seja `email.received`, e-mail endereçado a outra
+  caixa, resposta automática (`Auto-Submitted`, `Precedence: bulk`, autoresponder, lista) e
+  remetente de sistema (`no-reply@`, `mailer-daemon@`, `postmaster@`, `bounce@`);
+- põe em quarentena, sem criar nem casar lead, mensagem com `dmarc=fail`/`spf=fail`;
+- limita a criação de leads por e-mail a 5/hora por domínio e 20/hora no total;
+- deduplica por `svix-id` com estado: o id entra como `processing` e só vira `done` depois do
+  sucesso. Falha no meio libera o evento, para a **retentativa do Resend processar de verdade**
+  em vez de receber "duplicado" e a mensagem se perder.
+
+Responder 200 nesses casos é de propósito: erro faria o Resend retentar para sempre.
+
+## Variáveis de ambiente
+
+| ENV | Obrigatória | Para quê |
+|---|---|---|
+| `AGENT_AUTOPILOT` | para ligar o agente | `on` liga. Qualquer outro valor (ou ausente) = desligado. |
+| `LLM_PROVIDER` | não | `vertex` ou `openai` (default). |
+| `GOOGLE_VERTEX_SA` | se `vertex` | JSON inteiro da Service Account (aceita base64). |
+| `LLM_MODEL` | não | Default `google/gemini-3.7-flash` no vertex, `gpt-5-mini` no openai. |
+| `OPENAI_API_KEY` | se `openai` | Chave do provedor compatível. |
+| `BASE_URL` | **sim** p/ propostas | `https://crm.nexxustech.ia.br`. Sem ela o agente **não envia proposta** (o link sairia quebrado) e escala para o BDR. |
+| `EMAIL_API_KEY` / `EMAIL_FROM` | p/ enviar | Resend/SendGrid. Sem elas a Patrícia redige mas não envia. |
+| `EMAIL_WEBHOOK_SECRET` | p/ receber | Segredo do Resend Inbound (`whsec_...`). Sem ela a rota responde 503. |
+| `EMAIL_INBOUND_ADDRESS` | **sim** p/ receber | Caixa da Patrícia (ex.: `patricia@nexxustech.ia.br`). Sem ela a rota responde 503 — aceitar qualquer destinatário seria abrir a porta para tudo que o provedor encaminhar. |

@@ -1,69 +1,11 @@
 // sdr.js — SDR Agent: pesquisa de leads, preparação de abordagem e qualificação BANT.
-// Usa API compatível com OpenAI (Chat Completions) via node:https nativo (zero deps).
-// Env vars: OPENAI_API_KEY (obrigatória p/ IA), OPENAI_API_BASE (default api.openai.com/v1),
-//           SDR_MODEL (default gpt-5-mini).
+// Quem fala com o modelo é o llm.js (provider openai ou vertex): aqui ficam só os
+// prompts e os schemas de cada tarefa.
 'use strict';
-const https = require('https');
-const http = require('http');
-const { URL } = require('url');
+const llm = require('./llm');
 
-const API_BASE = (process.env.OPENAI_API_BASE || 'https://api.openai.com/v1').replace(/\/$/, '');
-const API_KEY = process.env.OPENAI_API_KEY || '';
-const MODEL = process.env.SDR_MODEL || 'gpt-5-mini';
-
-function isConfigured() { return !!API_KEY; }
-
-// ---------- chamada HTTP crua ao endpoint /chat/completions ----------
-function postJson(urlStr, headers, payload, timeoutMs) {
-  return new Promise((resolve, reject) => {
-    const u = new URL(urlStr);
-    const mod = u.protocol === 'http:' ? http : https;
-    const body = JSON.stringify(payload);
-    const req = mod.request({
-      hostname: u.hostname, port: u.port || (u.protocol === 'http:' ? 80 : 443),
-      path: u.pathname + u.search, method: 'POST',
-      headers: Object.assign({ 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) }, headers),
-    }, (res) => {
-      let data = '';
-      res.on('data', (c) => data += c);
-      res.on('end', () => {
-        try { resolve({ status: res.statusCode, json: JSON.parse(data) }); }
-        catch (e) { resolve({ status: res.statusCode, json: null, raw: data }); }
-      });
-    });
-    req.on('error', reject);
-    req.setTimeout(timeoutMs || 120000, () => { req.destroy(new Error('Timeout na chamada de IA.')); });
-    req.write(body); req.end();
-  });
-}
-
-async function chatJSON({ system, user, schemaName, schema, maxTokens }) {
-  if (!isConfigured()) throw new Error('IA não configurada. Defina OPENAI_API_KEY no ambiente.');
-  const payload = {
-    model: MODEL,
-    messages: [
-      { role: 'system', content: system },
-      { role: 'user', content: user },
-    ],
-    response_format: {
-      type: 'json_schema',
-      json_schema: { name: schemaName, strict: true, schema },
-    },
-  };
-  // GPT usa max_completion_tokens; Claude/Gemini usam max_tokens
-  if (maxTokens) {
-    if (/^gpt/i.test(MODEL)) payload.max_completion_tokens = maxTokens;
-    else payload.max_tokens = maxTokens;
-  }
-  const r = await postJson(API_BASE + '/chat/completions', { Authorization: 'Bearer ' + API_KEY }, payload);
-  if (r.status !== 200 || !r.json) {
-    const msg = (r.json && r.json.error && r.json.error.message) || ('HTTP ' + r.status);
-    throw new Error('Erro na IA: ' + msg);
-  }
-  const content = r.json.choices && r.json.choices[0] && r.json.choices[0].message && r.json.choices[0].message.content;
-  if (!content) throw new Error('IA retornou resposta vazia.');
-  return JSON.parse(content);
-}
+const isConfigured = llm.isConfigured;
+const chatJSON = llm.chatJSON;
 
 // ====================================================================
 // 1) PESQUISA DE LEADS — gera lista de empresas-alvo a partir do ICP
@@ -225,4 +167,7 @@ async function qualifyLead(ctx) {
   return out;
 }
 
-module.exports = { isConfigured, researchLeads, prepareOutreach, qualifyLead, MODEL };
+module.exports = { isConfigured, researchLeads, prepareOutreach, qualifyLead };
+// MODEL era constante lida no require. Agora o modelo depende do provider ativo, então
+// vira leitura dinâmica — a tela de status mostra o que está mesmo em uso.
+Object.defineProperty(module.exports, 'MODEL', { enumerable: true, get: () => llm.model() });
