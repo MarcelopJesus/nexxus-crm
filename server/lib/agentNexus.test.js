@@ -524,6 +524,72 @@ test('dúvida no meio de etapa determinística é respondida sem mexer na etapa'
 });
 
 // ====================================================================
+// Ping-pong agente ↔ BDR (regressão do lead #20 em produção)
+// ====================================================================
+test('BDR resolve "sim": etapa avança e a varredura seguinte NÃO reescala pela mesma razão', async () => {
+  const prod = produtoComCusto('Jira PingPong');
+  const lead = criaLead({ empresa: 'PingPong SA', productId: prod.id, qty: 10,
+    notes: 'Preciso de 10 licenças. Vocês conseguem 40% de desconto para pagamento anual?' });
+
+  // 1) A máscara SDR lê a dúvida de desconto e escala.
+  respostaLLM = decisao({ decision: 'escalate', bdr_summary: 'Cliente pede 40% de desconto.',
+    bdr_options: ['Podemos oferecer condição especial.', 'Vamos avaliar.', 'Consigo checar com o time.'] });
+  await agent.runLead(lead.id);
+  let d = store.get('leads', lead.id);
+  assert.equal(d.needs_bdr, 1, 'escalou, como esperado');
+  assert.equal(d.stage, 'novo_lead');
+
+  // 2) O BDR responde "sim, continuar".
+  const admin = store.findOne('users', u => u.role === 'admin');
+  const r = await api.handle({ method: 'POST', path: `/api/bdr/${lead.id}/resolve`,
+    body: { decision: 'yes', message: 'Conseguimos 10% para pagamento anual. Seguimos?' },
+    user: { id: admin.id, email: admin.email, area: admin.area, role: admin.role },
+    query: {}, headers: { host: 'localhost:3001' } });
+
+  d = store.get('leads', lead.id);
+  assert.equal(r.body.data.advanced, 'triagem');
+  assert.equal(d.stage, 'aguardando_cotacao', 'a etapa andou junto com o clique');
+  assert.equal(d.needs_bdr, 0);
+  assert.ok(d.bdr_resolved_at, 'a decisão ficou registrada como pendência resolvida');
+
+  // 3) A varredura seguinte roda com o MESMO texto de desconto ainda nas notas.
+  //    Se a máscara SDR fosse consultada de novo, ela escalaria igual — o ping-pong.
+  //    Como a etapa avançou, quem roda é o Comprador (determinístico, sem IA).
+  const escalacoes = () => store.find('activities', a => a.lead_id === lead.id
+    && /escalado para o BDR/.test(String(a.message))).length;
+  const escalacoesAntes = escalacoes();
+  respostaLLM = decisao({ decision: 'escalate', bdr_summary: 'Cliente pede 40% de desconto.',
+    bdr_options: ['A', 'B', 'C'] });   // se a SDR rodar de novo, escala — e o teste pega
+  await agent.runAgentSweep();
+
+  d = store.get('leads', lead.id);
+  assert.ok(!d.needs_bdr, 'NÃO voltou para a fila do BDR pela mesma razão');
+  assert.equal(escalacoes(), escalacoesAntes, 'nenhuma escalação nova neste lead');
+  assert.equal(d.stage, 'proposta_enviada', 'o funil seguiu: cotação, precificação e proposta');
+  assert.equal(store.find('quotes', q => q.lead_id === lead.id).length, 1);
+  assert.equal(store.find('proposals', p => p.lead_id === lead.id).length, 1);
+  assert.equal(store.find('proposals', p => p.lead_id === lead.id)[0].status, 'sent');
+});
+
+test('a pendência resolvida entra no prompt para a máscara não reescalar o mesmo caso', () => {
+  const lead = criaLead({ empresa: 'Contexto SA', notes: 'Quero 40% de desconto.' });
+  store.update('leads', lead.id, { bdr_resolved_at: store.now(), bdr_resolved_by: 'João',
+    bdr_last_pendencia: 'Cliente pede 40% de desconto.', bdr_last_answer: 'Conseguimos 10% no anual.' });
+
+  const ctx = agent.contextoLead(api.leadWithJoins(lead.id));
+  assert.match(ctx, /pendência anterior JÁ RESPONDIDA pelo time \(João\)/);
+  assert.match(ctx, /era sobre: "Cliente pede 40% de desconto\."/);
+  assert.match(ctx, /respondida assim: "Conseguimos 10% no anual\."/);
+  assert.match(ctx, /NÃO escale de novo por essa mesma razão/);
+  // E a informação é do TIME: fica no bloco confiável, antes de qualquer texto do cliente.
+  assert.ok(ctx.indexOf('pendência anterior JÁ RESPONDIDA') < ctx.indexOf('Nome da empresa, digitado pelo cliente'),
+    'fica no bloco confiável, não dentro da cerca');
+
+  const semPendencia = agent.contextoLead(api.leadWithJoins(criaLead({ empresa: 'Sem Pendencia' }).id));
+  assert.match(semPendencia, /Pendências anteriores: nenhuma/);
+});
+
+// ====================================================================
 // Etapa sem máscara: sem resposta automática, mas o "parar" é ouvido
 // ====================================================================
 // Lead em negociação (etapa que o agente não trabalha) com um e-mail recém-chegado.

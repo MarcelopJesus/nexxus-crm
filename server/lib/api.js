@@ -732,6 +732,10 @@ async function handle(req) {
 
     const texto = String(body.message||'').trim();
     if (!texto) return { status:400, body:{ success:false, error:{ message:'Escreva (ou escolha) a resposta que vai para o cliente.' } } };
+    // S.get devolve a linha VIVA: o avanço logo abaixo muda lead.stage debaixo do pé.
+    // A etapa em que o BDR decidiu tem de ser copiada agora, senão o contador de
+    // escalações é lido na etapa errada.
+    const etapaDecidida = String(lead.stage);
     const j = leadWithJoins(id);
     const assunto = body.subject || ('Sobre sua solicitação — '+(j.requested_software||j.product_name||'Nexxus Tech'));
     let envio = { sent:false, reason:'no_recipient' };
@@ -742,24 +746,43 @@ async function handle(req) {
       envio = await sendEmail({ to:j.contact_email, subject:assunto, html:corpo });
       if (envio.sent) logEmailOut(id, user.id, j.contact_email, assunto, texto, envio.id);
     }
-    log(id, user.id, 'bdr', 'BDR respondeu ao cliente'
+    // Memória da decisão: fica no lead para as PRÓXIMAS máscaras saberem que essa
+    // pendência já foi tratada por gente e não escalarem de novo pela mesma razão.
+    const quem = (S.get('users', user.id)||{}).name || 'BDR';
+    const pendencia = lead.bdr_summary || null;
+    S.update('leads', id, { needs_bdr:0, bdr_hold:0, bdr_summary:null, bdr_options:[],
+      bdr_resolved_at:S.now(), bdr_resolved_by:quem, bdr_last_pendencia:pendencia,
+      bdr_last_answer:texto.slice(0,600), updated_at:S.now() });
+    log(id, user.id, 'bdr', 'BDR ('+quem+') respondeu ao cliente'
       + (envio.sent ? (' (e-mail para '+j.contact_email+')') : ' — e-mail NÃO enviado ('+(envio.reason||'falha')+'), envie manualmente')
       + ': '+texto.slice(0,300));
-    // Esgotadas as tentativas do agente naquela etapa, devolver ao trilho só faria o
-    // lead voltar para a fila. Vira tarefa de gente.
+
+    // "Sim, continuar" = o humano JÁ decidiu que o negócio anda. A etapa avança agora,
+    // no mesmo clique — não na próxima varredura, e não relendo o texto que gerou a
+    // dúvida (foi assim que nasceu o ping-pong do lead #20 em produção).
+    let avanco = { avancou:null, motivo:'agente indisponível' };
+    try { avanco = await require('./agentNexus').avancarAposBdr(id, user.id); }
+    catch (e) { avanco = { avancou:null, motivo:'falha ao avançar: '+e.message }; }
+    if (avanco.avancou) {
+      log(id, user.id, 'bdr', 'BDR ('+quem+') respondeu e AVANÇOU a etapa ('+avanco.avancou+'). As próximas etapas seguem com o agente.');
+    } else {
+      log(id, user.id, 'bdr', 'BDR ('+quem+') respondeu; a etapa não tinha avanço automático aplicável ('+avanco.motivo+') — segue na mão.');
+      // Sem avanço, o lead precisa continuar elegível: a máscara roda de novo, agora
+      // sabendo (pelo contexto de pendência resolvida) que não deve reescalar o mesmo caso.
+      S.update('leads', id, { agent_done_stage:null });
+    }
+    // Esgotadas as tentativas do agente naquela etapa, alguém de carne e osso precisa
+    // acompanhar — mesmo com a etapa tendo andado.
     const MAX_ESCALACOES = 2;
-    const esgotou = ((lead.agent_escal||{})[lead.stage]||0) >= MAX_ESCALACOES;
-    const patch = { needs_bdr:0, bdr_hold:0, bdr_summary:null, bdr_options:[], updated_at:S.now() };
+    const esgotou = ((lead.agent_escal||{})[etapaDecidida]||0) >= MAX_ESCALACOES;
     if (esgotou) {
       S.insert('tasks', { lead_id:id, title:'Conduzir manualmente — o agente já tentou 2x nesta etapa: '+lead.title,
         type:'manual_takeover', area:'vendas', assignee_id: lead.owner_id||user.id, due_date:dueIn(1), done:0 });
-      log(id, user.id, 'bdr', 'Agente esgotou as tentativas nesta etapa — negócio segue na mão do responsável (tarefa criada).');
-    } else {
-      patch.agent_done_stage = null; // volta ao trilho: a próxima varredura retoma a etapa
+      log(id, user.id, 'bdr', 'Agente esgotou as tentativas nesta etapa — negócio acompanhado pelo responsável (tarefa criada).');
     }
-    S.update('leads', id, patch);
     return { status:200, body:{ success:true, data:{ status:'resolved', emailed: !!envio.sent,
-      email: envio, handedToHuman: esgotou } } };
+      email: envio, handedToHuman: esgotou, advanced: avanco.avancou, advanceReason: avanco.motivo||null,
+      stage: (S.get('leads', id)||{}).stage } } };
   }
   // Pausar/retomar o agente num lead específico ("esse caso em especial não quero automático").
   if ((m=P(/^\/api\/leads\/(\d+)\/agent-pause$/)) && method==='POST') {

@@ -54,24 +54,33 @@ test('GET /api/bdr lista os leads escalados com resumo e respostas prontas', asy
   assert.equal(r.body.data.count, r.body.data.items.length);
 });
 
-test('SIM envia a resposta escolhida e devolve o lead ao trilho do agente', async () => {
+test('SIM envia a resposta e AVANÇA a etapa no mesmo clique', async () => {
   const lead = leadEscalado('Beta BDR');
   const r = await call('POST', `/api/bdr/${lead.id}/resolve`, { decision: 'yes', message: 'Resposta B, editada pelo BDR.' });
 
   assert.equal(r.status, 200);
   assert.equal(r.body.data.emailed, true);
   assert.equal(enviados.length, 1);
-  assert.equal(enviados[0].to, 'cliente@example.com');
   assert.ok(enviados[0].html.includes('Resposta B, editada pelo BDR.'));
   assert.ok(enviados[0].html.includes('Patrícia — Assistente Comercial · Nexxus Tech'));
 
   const d = store.get('leads', lead.id);
   assert.equal(d.needs_bdr, 0, 'saiu da fila');
   assert.equal(d.status, 'open');
-  assert.equal(d.agent_done_stage, null, 'a próxima varredura retoma a etapa atual');
+  assert.equal(r.body.data.advanced, 'triagem');
+  assert.equal(d.stage, 'aguardando_cotacao', 'o "sim" do humano move a etapa na hora');
+  assert.equal(d.agent_done_stage, 'novo_lead', 'a etapa resolvida fica marcada; a próxima é do agente');
+  assert.ok(store.find('tasks', t => t.lead_id === lead.id && t.type === 'quote_request').length === 1,
+    'a triagem despachou Compras de verdade');
+
   const acts = store.find('activities', a => a.lead_id === lead.id);
-  assert.ok(acts.some(a => a.type === 'bdr'), 'a decisão fica na timeline');
+  assert.ok(acts.some(a => a.type === 'bdr' && /AVANÇOU a etapa/.test(a.message)), 'a timeline diz que avançou');
   assert.ok(acts.some(a => a.type === 'email_out'), 'a resposta entra na thread de e-mail');
+
+  // Memória para as próximas máscaras não reescalarem a mesma pendência.
+  assert.ok(d.bdr_resolved_at);
+  assert.match(d.bdr_last_pendencia, /desconto fora da faixa/);
+  assert.match(d.bdr_last_answer, /Resposta B/);
 });
 
 test('NÃO fecha o negócio como perdido com o motivo informado', async () => {
@@ -145,19 +154,37 @@ test('SIM com as tentativas do agente esgotadas entrega o lead para um humano', 
   assert.equal(r.body.data.handedToHuman, true);
   const d = store.get('leads', lead.id);
   assert.equal(d.needs_bdr, 0);
-  assert.notEqual(d.agent_done_stage, null, 'NÃO volta para o agente');
+  assert.equal(d.stage, 'aguardando_cotacao', 'o humano disse para seguir: a etapa anda mesmo assim');
   const tarefa = store.find('tasks', t => t.lead_id === lead.id && t.type === 'manual_takeover');
-  assert.equal(tarefa.length, 1, 'vira tarefa do responsável');
+  assert.equal(tarefa.length, 1, 'mas alguém de carne e osso acompanha');
   assert.equal(tarefa[0].assignee_id, admin.id);
 });
 
-test('SIM dentro do limite continua devolvendo o lead ao agente', async () => {
+test('SIM dentro do limite avança sem criar tarefa de condução manual', async () => {
   const lead = leadEscalado('Lambda BDR');
   store.update('leads', lead.id, { agent_escal: { novo_lead: 1 } });
   const r = await call('POST', `/api/bdr/${lead.id}/resolve`, { decision: 'yes', message: 'Resposta.' });
   assert.equal(r.body.data.handedToHuman, false);
-  assert.equal(store.get('leads', lead.id).agent_done_stage, null);
+  assert.equal(r.body.data.advanced, 'triagem');
+  assert.equal(store.get('leads', lead.id).stage, 'aguardando_cotacao');
   assert.equal(store.find('tasks', t => t.lead_id === lead.id && t.type === 'manual_takeover').length, 0);
+});
+
+test('etapa sem avanço automático apenas registra e devolve o lead ao agente', async () => {
+  const lead = leadEscalado('Xi BDR');
+  // Aguardando cotação, mas sem produto no catálogo: não há cotação automática possível.
+  store.update('leads', lead.id, { stage: 'aguardando_cotacao', agent_done_stage: 'aguardando_cotacao' });
+
+  const r = await call('POST', `/api/bdr/${lead.id}/resolve`, { decision: 'yes', message: 'Vamos cotar com o fabricante.' });
+  const d = store.get('leads', lead.id);
+
+  assert.equal(r.body.data.advanced, null);
+  assert.match(r.body.data.advanceReason, /sem custo cadastrado/);
+  assert.equal(d.stage, 'aguardando_cotacao', 'não inventou avanço');
+  assert.equal(d.needs_bdr, 0, 'mas saiu da fila — o BDR já respondeu');
+  assert.equal(d.agent_done_stage, null, 'segue elegível, agora com a pendência marcada como resolvida');
+  assert.ok(store.find('activities', a => a.lead_id === lead.id)
+    .some(a => a.type === 'bdr' && /não tinha avanço automático/.test(a.message)));
 });
 
 test('a fila do BDR continua mostrando os casos em hold', async () => {

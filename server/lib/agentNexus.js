@@ -81,6 +81,22 @@ const AVISO_INJECAO = [
 // e-mail: nome da empresa, nome do contato, assunto, o software pedido, as notas. Só o que
 // o CRM calcula (etapa, quantidade normalizada, produto casado no catálogo) é confiável.
 // Por isso a cerca cobre campo a campo, e não só o corpo do e-mail.
+// O que o time JÁ resolveu neste lead. Entra no bloco confiável (foi escrito por um
+// humano da casa, não pelo cliente) e existe por um motivo concreto: sem isso a máscara
+// relê a dúvida antiga que continua nas notas e escala de novo pela mesma razão.
+function pendenciaResolvida(lead) {
+  if (!lead.bdr_resolved_at) return '- Pendências anteriores: nenhuma.';
+  const quando = String(lead.bdr_resolved_at).slice(0, 16);
+  return [
+    '- ATENÇÃO — pendência anterior JÁ RESPONDIDA pelo time'
+      + (lead.bdr_resolved_by ? (' (' + lead.bdr_resolved_by + ')') : '') + ' em ' + quando + ':',
+    lead.bdr_last_pendencia ? ('    era sobre: "' + String(lead.bdr_last_pendencia).slice(0, 300) + '"' ) : '    (sem resumo)',
+    '    respondida assim: "' + String(lead.bdr_last_answer || '').slice(0, 400) + '"',
+    '  NÃO escale de novo por essa mesma razão — ela já foi tratada por uma pessoa e o negócio',
+    '  foi liberado para seguir. Escale apenas se aparecer um problema NOVO, diferente desse.',
+  ].join('\n');
+}
+
 function contextoLead(lead) {
   const prod = lead.product_id ? S.get('products', lead.product_id) : null;
   const acts = S.find('activities', a => a.lead_id === lead.id).sort(byCreatedDesc).slice(0, 12)
@@ -96,6 +112,7 @@ function contextoLead(lead) {
     '- Origem: ' + (lead.source || '—'),
     '- Produto casado no catálogo: ' + (lead.product_name || 'nenhum'),
     '- E-mail do contato: ' + (lead.contact_email || 'SEM e-mail cadastrado'),
+    pendenciaResolvida(lead),
     '',
     'Faixas de preço publicadas no catálogo (ÚNICA fonte de preço permitida): ' + faixasTexto(prod),
     '',
@@ -610,6 +627,77 @@ async function runSdrSobreEmail(lead, cls) {
 }
 
 // ====================================================================
+// Avanço disparado pelo "sim" do BDR
+// ====================================================================
+// Decisão da reunião: "sim, continuar → já avançou, segue o fluxo". O clique do humano
+// move a etapa NA HORA. Sem isso o lead voltava ao trilho na mesma etapa, a máscara relia
+// o mesmo texto do cliente e escalava pela mesma razão — o ping-pong visto em produção
+// no lead #20.
+// Este caminho NUNCA escala: se o avanço automático não se aplica (sem custo no catálogo,
+// sem BASE_URL, sem e-mail), apenas registra e deixa para o humano — devolver o caso para
+// a fila do BDR seria recriar o ping-pong por outro caminho.
+async function avancarAposBdr(leadId, userId) {
+  const bruto = S.get('leads', leadId);
+  if (!bruto || bruto.status !== 'open') return { avancou: null, motivo: 'negócio não está mais aberto' };
+  const etapa = String(bruto.stage);
+  const lead = api.leadWithJoins(leadId);
+
+  if (etapa === 'novo_lead') {
+    const ok = api.triageLead(leadId, userId,
+      MASK_LABEL.sdr + ' — pendência resolvida pelo BDR: demanda validada e despachada para Compras.');
+    return ok ? { avancou: 'triagem' } : { avancou: null, motivo: 'negócio não está mais aberto' };
+  }
+
+  if (etapa === 'aguardando_cotacao') {
+    const prod = lead.product_id ? S.get('products', lead.product_id) : null;
+    const tier = prod ? pickCostTier(prod, lead.qty) : null;
+    if (!tier) return { avancou: null, motivo: 'sem custo cadastrado para ' + nomeProduto(lead) + ' — a cotação segue manual' };
+    const qty = lead.qty || 1;
+    const cot = api.createQuote({
+      leadId, productId: prod.id, supplierId: prod.supplier_id || null,
+      costAmount: Number(tier.unitCostUsd), currency: 'USD', qty,
+      ref: 'catálogo do site' + (tier.planName ? (' · ' + tier.planName) : ''),
+      notes: 'Cotação automática após decisão do BDR.',
+      mensagem: MASK_LABEL.comprador + ' — pendência resolvida pelo BDR: cotação criada pelo catálogo (USD '
+        + Number(tier.unitCostUsd).toLocaleString('pt-BR') + '/un para ' + qty + ' licença(s)).',
+    });
+    return cot ? { avancou: 'cotacao' } : { avancou: null, motivo: 'negócio não está mais aberto' };
+  }
+
+  if (etapa === 'precificacao') {
+    const quote = S.find('quotes', q => q.lead_id === leadId).sort(byCreatedDesc)[0];
+    if (!quote) return { avancou: null, motivo: 'ainda não há cotação registrada' };
+    if (!process.env.BASE_URL) return { avancou: null, motivo: 'BASE_URL não configurada — o link da proposta sairia quebrado' };
+    if (!lead.contact_email) return { avancou: null, motivo: 'contato sem e-mail cadastrado' };
+
+    const prec = await api.savePricingFor({
+      leadId, quoteId: quote.id, costUsd: quote.cost_amount, qty: quote.qty, userId,
+      exigirEtapa: etapa,
+      mensagem: MASK_LABEL.vendedor + ' — pendência resolvida pelo BDR: precificação automática.',
+    });
+    if (prec.aborted) return { avancou: null, motivo: prec.aborted };
+    const sugerido = Number(prec.calc.suggestedPrice), piso = Number(prec.calc.minPrice);
+    if (!isFinite(sugerido) || sugerido <= 0) return { avancou: null, motivo: 'a precificação não fechou' };
+    const preco = isFinite(piso) && piso > sugerido ? piso : sugerido;
+
+    const r = api.createProposal({ leadId, finalPrice: preco, userId, draft: true });
+    if (r.notOpen) return { avancou: null, motivo: 'negócio não está mais aberto' };
+    if (r.belowFloor) return { avancou: null, motivo: 'preço sugerido ficou abaixo do piso' };
+    const envio = await api.sendProposalEmail({ propId: r.row.id, userId, exigirEtapa: etapa });
+    if (envio && envio.aborted) return { avancou: null, motivo: envio.aborted };
+    if (!envio || !envio.email || !envio.email.sent)
+      return { avancou: null, motivo: 'o envio do e-mail falhou — a proposta ficou em rascunho' };
+    api.promoverProposta(r.row.id, userId, MASK_LABEL.vendedor + ' — pendência resolvida pelo BDR: proposta v'
+      + r.row.version + ' no preço sugerido (R$ '
+      + preco.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+      + ') enviada ao cliente. Follow-ups agendados (D+1/2/7/15).');
+    return { avancou: 'proposta', preco };
+  }
+
+  return { avancou: null, motivo: 'a etapa "' + etapa + '" não tem avanço automático' };
+}
+
+// ====================================================================
 // Varredura
 // ====================================================================
 const MASK_RUNNER = { sdr: runSdr, comprador: runComprador, vendedor: runVendedor };
@@ -778,4 +866,4 @@ function reagirAEmail(leadId) {
 module.exports = { runAgentSweep, runLead, dispararParaLead, reagirAEmail, isEnabled, motivoDesligado,
   MASK_LABEL, MASK_BY_STAGE, elegivel, faixasTexto, contextoLead,
   precoForaDoCatalogo, valoresEmReais, estourouCota, mudouDebaixo, cercar, classificarEmail,
-  triarSemMascara, _emAndamento: emAndamento };
+  triarSemMascara, avancarAposBdr, _emAndamento: emAndamento };
