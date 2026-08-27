@@ -42,6 +42,7 @@ function APP_TEMPLATE() { return `
     <div class="nav-item" v-if="canArea('vendas')" :class="{active: route==='/bdr'}" @click="go('/bdr'); loadBdr()"><span class="ic">◈</span> BDR
       <span v-if="S.bdr.count" style="margin-left:auto;background:var(--nx-hot);color:#fff;border-radius:999px;font-size:10.5px;padding:1px 7px;font-weight:700">{{ S.bdr.count }}</span>
     </div>
+    <div class="nav-item" v-if="canArea('vendas')" :class="{active: route==='/faq'}" @click="go('/faq'); loadFaq()"><span class="ic">?</span> FAQ</div>
     <div class="nav-group">Administração</div>
     <div class="nav-item" :class="{active: route==='/config'}" @click="go('/config')"><span class="ic">⚙</span> Catálogo & Regras</div>
     <div class="nav-item" :class="{active: route==='/usuarios'}" @click="go('/usuarios'); loadUsers()"><span class="ic">◔</span> Usuários</div>
@@ -57,6 +58,7 @@ function APP_TEMPLATE() { return `
         <template v-else-if="route==='/tarefas'">Tarefas & Follow-up</template>
         <template v-else-if="route==='/sdr'">SDR Agent — Prospecção Inteligente</template>
         <template v-else-if="route==='/bdr'">BDR — Decisões do Agente Nexus</template>
+        <template v-else-if="route==='/faq'">FAQ — Respostas oficiais do time</template>
         <template v-else-if="route==='/config'">Catálogo & Regras de Precificação</template>
         <template v-else-if="route==='/usuarios'">Usuários & Permissões</template>
       </h1>
@@ -274,6 +276,18 @@ function APP_TEMPLATE() { return `
             <button class="btn btn-ghost btn-sm" @click="openLead(l.id)">Abrir lead</button>
           </div>
 
+          <!-- Recusa sem motivo: a decisão da reunião é perder o negócio — mas quem clica é gente. -->
+          <div v-if="l.bdr_suggest_lost" class="mt" style="border:1px solid #f0c36d;background:#fff8e6;border-radius:10px;padding:11px 13px">
+            <b style="font-size:13px">Ação recomendada: marcar como perdido.</b>
+            <div class="small muted" style="margin-top:3px">O cliente recusou sem dizer por quê — não há objeção a contornar. Se preferir tentar uma resposta, use as opções abaixo.</div>
+            <div class="field mt" style="margin-bottom:8px">
+              <label>Motivo da perda</label>
+              <input v-model="S.bdrLost[l.id]"/>
+            </div>
+            <button class="btn btn-sm" @click="resolveBdr(l,'no')" :disabled="S.bdrBusy===l.id"
+              style="background:var(--nx-danger);border-color:var(--nx-danger)">✕ Marcar como perdido</button>
+          </div>
+
           <div class="mt">
             <div class="section-title" style="font-size:13px">Respostas recomendadas (clique para usar)</div>
             <div v-for="(op,i) in l.bdr_options" :key="i" @click="useBdrOption(l, op)"
@@ -305,6 +319,62 @@ function APP_TEMPLATE() { return `
         </div>
 
         <div v-if="!S.bdr.items.length" class="card card-p muted">Nada pendente. O agente está dando conta do funil sozinho.</div>
+      </div>
+
+      <!-- ===== FAQ — o que o time já respondeu vira resposta oficial do agente ===== -->
+      <div v-else-if="route==='/faq'">
+        <div class="card card-p mb">
+          <div class="flex between center">
+            <div>
+              <div class="section-title" style="margin:0">Respostas oficiais</div>
+              <p class="small muted" style="margin:4px 0 0">Toda vez que o BDR responde uma pendência, a dúvida vira uma entrada aqui — generalizada, sem nome de cliente nem valores. O agente usa as ativas para responder sozinho, em vez de escalar de novo.</p>
+            </div>
+            <span class="chip">{{ S.faq.active }} ativa(s)</span>
+          </div>
+        </div>
+
+        <div class="card card-p mb">
+          <div class="section-title">Adicionar manualmente</div>
+          <div class="field"><label>Pergunta</label><input v-model="S.faqNew.question" placeholder="Ex.: Vocês emitem nota fiscal nacional?"/></div>
+          <div class="field"><label>Resposta oficial</label>
+            <textarea v-model="S.faqNew.answer" rows="3" placeholder="Resposta geral, sem nome de cliente e sem valores específicos…"
+              style="width:100%;padding:10px;border:1px solid var(--nx-border);border-radius:8px;font-family:inherit;font-size:13px"></textarea>
+          </div>
+          <button class="btn btn-sm" @click="addFaq">Adicionar à FAQ</button>
+        </div>
+
+        <div v-for="f in S.faq.items" :key="f.id" class="card card-p mb" :style="{opacity: f.active ? 1 : .55}">
+          <div v-if="S.faqEdit.id === f.id">
+            <div class="field"><label>Pergunta</label><input v-model="S.faqEdit.question"/></div>
+            <div class="field"><label>Resposta oficial</label>
+              <textarea v-model="S.faqEdit.answer" rows="4"
+                style="width:100%;padding:10px;border:1px solid var(--nx-border);border-radius:8px;font-family:inherit;font-size:13px"></textarea>
+            </div>
+            <div class="flex gap">
+              <button class="btn btn-sm" @click="saveFaqEdit">Salvar</button>
+              <button class="btn btn-ghost btn-sm" @click="cancelFaqEdit">Cancelar</button>
+            </div>
+          </div>
+          <div v-else class="flex between">
+            <div style="flex:1;min-width:0">
+              <div class="flex center gap">
+                <b style="font-size:14px">{{ f.question }}</b>
+                <span v-if="!f.active" class="badge" style="background:var(--nx-text-mute);color:#fff">inativa</span>
+              </div>
+              <div class="small" style="margin-top:5px;line-height:1.55">{{ f.answer }}</div>
+              <div class="muted" style="font-size:11.5px;margin-top:6px">
+                {{ f.source_lead_id ? ('origem: lead #' + f.source_lead_id + (f.source_lead_title ? (' — ' + f.source_lead_title) : '')) : 'cadastro manual' }}
+                · {{ f.created_by_name || 'agente' }} · {{ fmtDT(f.created_at) }}
+              </div>
+            </div>
+            <div class="flex gap" style="align-items:flex-start">
+              <button class="btn btn-ghost btn-sm" @click="editFaq(f)">Editar</button>
+              <button class="btn btn-ghost btn-sm" @click="toggleFaq(f)">{{ f.active ? 'Desativar' : 'Ativar' }}</button>
+            </div>
+          </div>
+        </div>
+
+        <div v-if="!S.faq.items.length" class="card card-p muted">Nenhuma pergunta na FAQ ainda. Ela se preenche sozinha conforme o BDR responde as pendências.</div>
       </div>
 
       <!-- ===== CONFIG / CATÁLOGO ===== -->

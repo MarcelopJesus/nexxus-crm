@@ -21,6 +21,7 @@ const S = require('./store');
 const api = require('./api');
 const llm = require('./llm');
 const mailer = require('./mailer');
+const faq = require('./faq');
 const { pickCostTier } = require('./catalogSync');
 
 const MASK_LABEL = { sdr: 'Nexus·SDR', comprador: 'Nexus·Comprador', vendedor: 'Nexus·Vendedor' };
@@ -113,6 +114,8 @@ function contextoLead(lead) {
     '- Produto casado no catálogo: ' + (lead.product_name || 'nenhum'),
     '- E-mail do contato: ' + (lead.contact_email || 'SEM e-mail cadastrado'),
     pendenciaResolvida(lead),
+    // FAQ oficial: pergunta que o time já respondeu uma vez não volta para a fila do BDR.
+    faq.blocoContexto(),
     '',
     'Faixas de preço publicadas no catálogo (ÚNICA fonte de preço permitida): ' + faixasTexto(prod),
     '',
@@ -289,6 +292,9 @@ const SDR_SYSTEM = [
   '  publicadas e com o que a Nexxus faz. Escreva a resposta em reply_subject/reply_body e o lead segue mesmo assim.',
   '- "escalate": você NÃO sabe responder, ou é pedido fora do padrão (desconto especial, condição',
   '  de pagamento, contrato específico, produto que não está no catálogo). Aí um humano (BDR) decide.',
+  '',
+  'FAQ OFICIAL: se a dúvida do cliente estiver coberta por uma das perguntas da FAQ que você recebeu,',
+  'a resposta já foi aprovada pelo time — use "reply_and_advance" com ela e NÃO escale por essa razão.',
   '',
   'REGRAS DE PREÇO (importantes): nunca invente valor, nunca prometa desconto e nunca fale de preço',
   'fora das faixas publicadas que você recebeu. Se não há faixa publicada e o cliente perguntou preço, escale.',
@@ -698,6 +704,66 @@ async function avancarAposBdr(leadId, userId) {
 }
 
 // ====================================================================
+// Recusa de proposta — 3 respostas prontas para o BDR
+// ====================================================================
+// Isto NÃO é o agente falando com o cliente: é sugestão de texto para um humano escolher.
+// Por isso não depende do piloto automático (AGENT_AUTOPILOT), só de ter modelo. E roda
+// sempre DEPOIS que a rota pública já respondeu ao cliente: a página de recusa não pode
+// falhar nem esperar a IA (as 3 opções fixas ficam se o modelo estiver off ou errar).
+const RECUSA_SCHEMA = {
+  type: 'object',
+  properties: { options: { type: 'array', items: { type: 'string' } } },
+  required: ['options'], additionalProperties: false,
+};
+const RECUSA_SYSTEM = [
+  'Você é a Patrícia, Assistente Comercial da Nexxus Tech — revenda B2B oficial de softwares',
+  'internacionais com preço em reais, nota fiscal nacional e suporte em português.',
+  'Um cliente acabou de RECUSAR a proposta e explicou o motivo. Escreva EXATAMENTE 3 respostas',
+  'diferentes para o vendedor escolher e enviar como estão:',
+  '  1) contornar a objeção — trate o motivo de frente, com o que a Nexxus entrega;',
+  '  2) propor um ajuste — sugira revisar quantidade, período ou escopo e mandar nova versão;',
+  '  3) agradecer e deixar a porta aberta — encerre com elegância, sem insistir.',
+  '',
+  'NUNCA cite valores, percentuais de desconto ou qualquer número: quem decide preço é gente.',
+  'Não prometa nada que dependa de aprovação. Português brasileiro, cordial, direto, sem clichê.',
+  'Não assine: a assinatura é adicionada automaticamente.',
+].join('\n');
+
+// Troca as opções fixas pelas geradas. Só escreve se a recusa AINDA for o caso pendente
+// na fila (o BDR pode ter resolvido enquanto o modelo pensava).
+async function gerarOpcoesRecusa(leadId, propId, motivo) {
+  const antes = S.get('leads', leadId);
+  if (!antes || !antes.needs_bdr || antes.bdr_prop_id !== propId) return { skipped: 'a recusa já saiu da fila' };
+  if (!llm.isConfigured()) return { skipped: 'IA não configurada' };
+  const lead = api.leadWithJoins(leadId);
+  const out = await llm.chatJSON({
+    system: RECUSA_SYSTEM,
+    user: contextoLead(lead) + '\n\nMotivo da recusa, escrito pelo cliente:\n' + cercar(motivo)
+      + '\n\nEscreva as 3 respostas.',
+    schemaName: 'respostas_recusa', schema: RECUSA_SCHEMA, maxTokens: 2500,
+  });
+  const opts = (Array.isArray(out.options) ? out.options : [])
+    .map(s => String(s == null ? '' : s).trim()).filter(Boolean).slice(0, 3);
+  if (opts.length < 3) return { skipped: 'o modelo devolveu menos de 3 respostas' };
+  // Mesma conferência das respostas do funil: número que não existe no catálogo não pode
+  // virar texto que o BDR manda com um clique.
+  const inventado = precoForaDoCatalogo(lead, opts.join(' '));
+  if (inventado != null) return { skipped: 'resposta citava o número ' + inventado + ', fora do catálogo' };
+  const depois = S.get('leads', leadId);
+  if (!depois || !depois.needs_bdr || depois.bdr_prop_id !== propId) return { skipped: 'o BDR resolveu no meio' };
+  S.update('leads', leadId, { bdr_options: opts });
+  return { options: opts };
+}
+// Dispara sem bloquear e sem deixar erro escapar para a rota pública.
+function dispararOpcoesRecusa(leadId, propId, motivo) {
+  setImmediate(() => {
+    gerarOpcoesRecusa(leadId, propId, motivo).then(r => {
+      if (r && r.skipped) console.log('[agente] opções de recusa do lead ' + leadId + ' seguem as fixas — ' + r.skipped);
+    }).catch(e => console.error('[agente] falha ao gerar respostas de recusa do lead ' + leadId + ':', e.message));
+  });
+}
+
+// ====================================================================
 // Varredura
 // ====================================================================
 const MASK_RUNNER = { sdr: runSdr, comprador: runComprador, vendedor: runVendedor };
@@ -866,4 +932,5 @@ function reagirAEmail(leadId) {
 module.exports = { runAgentSweep, runLead, dispararParaLead, reagirAEmail, isEnabled, motivoDesligado,
   MASK_LABEL, MASK_BY_STAGE, elegivel, faixasTexto, contextoLead,
   precoForaDoCatalogo, valoresEmReais, estourouCota, mudouDebaixo, cercar, classificarEmail,
-  triarSemMascara, avancarAposBdr, _emAndamento: emAndamento };
+  triarSemMascara, avancarAposBdr, gerarOpcoesRecusa, dispararOpcoesRecusa,
+  _emAndamento: emAndamento };

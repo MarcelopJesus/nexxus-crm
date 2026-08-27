@@ -7,6 +7,7 @@ const { calculatePricing } = require('./pricing');
 const { sendEmail, isConfigured } = require('./mailer');
 const sdr = require('./sdr');
 const catalog = require('./catalogSync');
+const faq = require('./faq');
 const S = store; // alias
 
 const STAGES = [
@@ -307,6 +308,39 @@ function linkVencido(prop, leadRow) {
     return { status:409, body:{ success:false, error:{ message:`Há uma proposta mais recente (v${newer.version}). Peça o link atualizado ao responsável comercial.` } } };
   return null;
 }
+// ---- Recusa de proposta -> fila do BDR ----
+// Decisão da reunião: "recusou com motivo, eu respondo; sem motivo, lost direto". O
+// "lost direto" continua sendo UM CLIQUE humano — a rota só deixa o botão pronto, com o
+// motivo preenchido. Nada é decidido automaticamente sobre dinheiro na mesa.
+// O lead PERMANECE no estágio em que está: quem move é a decisão do BDR.
+const OPCOES_RECUSA_PADRAO = [
+  'Obrigado por avisar. Antes de encerrarmos, posso detalhar o que está incluído: licenciamento oficial, nota fiscal nacional e suporte em português durante todo o contrato. Faz sentido conversarmos cinco minutos?',
+  'Consigo revisar as condições com você. Dá para ajustar a quantidade de licenças ou o período de contratação e eu preparo uma segunda versão da proposta. Quer que eu envie?',
+  'Entendido, obrigado pelo retorno. Deixo o contato aberto: se o cenário mudar ou você precisar de uma nova cotação, é só me chamar.',
+];
+function enfileirarRecusa(prop, lead, motivo) {
+  const atual = S.get('leads', prop.lead_id);
+  if (!atual || atual.status !== 'open') return;
+  const resumo = motivo
+    ? `Cliente recusou a proposta v${prop.version}: ${String(motivo).slice(0,300)}`
+    : `Cliente recusou a proposta v${prop.version} sem informar motivo`;
+  S.update('leads', prop.lead_id, { needs_bdr:1, bdr_hold:0, bdr_mask:'recusa', bdr_summary:resumo,
+    // Opções fixas desde já: a rota pública nunca espera a IA nem falha por causa dela.
+    bdr_options: OPCOES_RECUSA_PADRAO.slice(), bdr_prop_id: prop.id,
+    bdr_suggest_lost: motivo ? 0 : 1, bdr_lost_hint: motivo ? null : 'Proposta recusada sem motivo',
+    bdr_at:S.now(), updated_at:S.now() });
+  notify('bdr_action', `BDR precisa decidir — ${clientName(lead)} recusou a proposta v${prop.version}.`
+    + (motivo ? (' Motivo: '+String(motivo).slice(0,120)) : ' Sem motivo informado — ação recomendada: marcar como perdido.'),
+    prop.lead_id);
+  log(prop.lead_id, null, 'bdr', 'Recusa da proposta v'+prop.version+' enviada para a fila do BDR'
+    + (motivo ? ' com o motivo do cliente.' : ' — sem motivo, a ação recomendada é marcar como perdido.'));
+  // Sem motivo não há objeção a contornar: as 3 respostas geradas só fazem sentido com ele.
+  if (motivo) {
+    try { require('./agentNexus').dispararOpcoesRecusa(prop.lead_id, prop.id, motivo); }
+    catch (e) { console.error('[agente] não foi possível gerar respostas de recusa:', e.message); }
+  }
+}
+
 // preview=1: o time abre a própria proposta sem contaminar o rastreio.
 function isPreview(req) {
   const v = String(((req.query)||{}).preview || '').toLowerCase();
@@ -579,6 +613,9 @@ async function handle(req) {
       const lead = leadWithJoins(prop.lead_id);
       log(prop.lead_id, null, 'proposal', `Proposta v${prop.version} RECUSADA pelo cliente.`+(reason?(' Motivo: '+reason):''));
       notify('proposal_rejected', `${clientName(lead)} recusou a proposta v${prop.version}.`+(reason?(' Motivo: '+reason):''), prop.lead_id);
+      // O "não" do cliente não morre no log: vira decisão na fila do BDR. Dentro deste if
+      // de propósito — re-recusar a mesma proposta não entra na fila duas vezes.
+      enfileirarRecusa(prop, lead, reason);
     }
     return { status:200, body:{ success:true } };
   }
@@ -706,7 +743,9 @@ async function handle(req) {
           contact_email:j.contact_email, stage:l.stage, qty:l.qty,
           product_name:j.product_name, requested_software:l.requested_software,
           bdr_summary:l.bdr_summary||null, bdr_options:Array.isArray(l.bdr_options)?l.bdr_options:[],
-          bdr_mask:l.bdr_mask||null, bdr_hold:l.bdr_hold?1:0, bdr_at:l.bdr_at||l.updated_at||null }; });
+          bdr_mask:l.bdr_mask||null, bdr_hold:l.bdr_hold?1:0, bdr_at:l.bdr_at||l.updated_at||null,
+          // Recusa sem motivo: a tela destaca "Marcar como perdido" com o motivo pronto.
+          bdr_suggest_lost:l.bdr_suggest_lost?1:0, bdr_lost_hint:l.bdr_lost_hint||null }; });
     return { status:200, body:{ success:true, data:{ items:rows, count:rows.length } } };
   }
   // Decisão do BDR: sim (responde e devolve ao agente), não (perde) ou hold (segura).
@@ -719,7 +758,7 @@ async function handle(req) {
     if (decision==='no') {
       closeLost(id, user.id, body.lost_reason||'Descartado pelo BDR',
         'Negócio PERDIDO (decisão do BDR). Motivo: '+(body.lost_reason||'Descartado pelo BDR'));
-      S.update('leads', id, { needs_bdr:0, bdr_hold:0 });
+      S.update('leads', id, { needs_bdr:0, bdr_hold:0, bdr_suggest_lost:0, bdr_lost_hint:null, bdr_prop_id:null });
       return { status:200, body:{ success:true, data:{ status:'lost' } } };
     }
     if (decision==='hold') {
@@ -751,8 +790,12 @@ async function handle(req) {
     const quem = (S.get('users', user.id)||{}).name || 'BDR';
     const pendencia = lead.bdr_summary || null;
     S.update('leads', id, { needs_bdr:0, bdr_hold:0, bdr_summary:null, bdr_options:[],
+      bdr_suggest_lost:0, bdr_lost_hint:null, bdr_prop_id:null,
       bdr_resolved_at:S.now(), bdr_resolved_by:quem, bdr_last_pendencia:pendencia,
       bdr_last_answer:texto.slice(0,600), updated_at:S.now() });
+    // FAQ que aprende: a dúvida que acabou de ser respondida vira resposta oficial, para
+    // a próxima igual ser respondida pelo agente em vez de voltar para esta fila.
+    dispararFaq(id, pendencia, texto, user.id);
     log(id, user.id, 'bdr', 'BDR ('+quem+') respondeu ao cliente'
       + (envio.sent ? (' (e-mail para '+j.contact_email+')') : ' — e-mail NÃO enviado ('+(envio.reason||'falha')+'), envie manualmente')
       + ': '+texto.slice(0,300));
@@ -784,6 +827,38 @@ async function handle(req) {
       email: envio, handedToHuman: esgotou, advanced: avanco.avancou, advanceReason: avanco.motivo||null,
       stage: (S.get('leads', id)||{}).stage } } };
   }
+  // ==================== FAQ — respostas oficiais que o agente usa ====================
+  // Cada entrada ativa entra no contexto do agente como verdade aprovada pelo time: dúvida
+  // coberta aqui é respondida pela máscara SDR e não volta para a fila do BDR.
+  if (method==='GET' && path==='/api/faq') {
+    if (!canArea(user,'vendas')) return forbidden('Apenas Vendas/Admin acessa a FAQ.');
+    const um = byId('users'), lm = byId('leads');
+    const rows = faq.todas().map(f => Object.assign({}, f, {
+      created_by_name: f.created_by&&um[f.created_by] ? um[f.created_by].name : null,
+      source_lead_title: f.source_lead_id&&lm[f.source_lead_id] ? lm[f.source_lead_id].title : null }));
+    return { status:200, body:{ success:true, data:{ items:rows, active: rows.filter(f=>f.active).length } } };
+  }
+  if (method==='POST' && path==='/api/faq') {
+    if (!canArea(user,'vendas')) return forbidden('Apenas Vendas/Admin escreve na FAQ.');
+    const r = faq.salvarSeNova({ question:body.question, answer:body.answer,
+      sourceLeadId: body.source_lead_id||null, createdBy:user.id });
+    if (!r.salvo) return { status:409, body:{ success:false, error:{ message:'Não foi salvo: '+r.motivo+'.' },
+      data:{ repetidaDe: r.repetidaDe||null } } };
+    return { status:201, body:{ success:true, data: r.salvo } };
+  }
+  if ((m=P(/^\/api\/faq\/(\d+)$/)) && method==='PATCH') {
+    if (!canArea(user,'vendas')) return forbidden('Apenas Vendas/Admin edita a FAQ.');
+    const id=+m[1]; if (!S.get('faq_entries', id)) return notfound();
+    const patch = {};
+    if (body.question !== undefined) patch.question = String(body.question||'').trim().slice(0, faq.MAX_PERGUNTA);
+    if (body.answer !== undefined) patch.answer = String(body.answer||'').trim().slice(0, faq.MAX_RESPOSTA);
+    if (body.active !== undefined) patch.active = body.active ? 1 : 0;
+    if (patch.question === '' || patch.answer === '')
+      return { status:400, body:{ success:false, error:{ message:'Pergunta e resposta não podem ficar vazias.' } } };
+    patch.updated_at = S.now();
+    return { status:200, body:{ success:true, data: S.update('faq_entries', id, patch) } };
+  }
+
   // Pausar/retomar o agente num lead específico ("esse caso em especial não quero automático").
   if ((m=P(/^\/api\/leads\/(\d+)\/agent-pause$/)) && method==='POST') {
     if (!canArea(user,'vendas')) return forbidden('Apenas Vendas/Admin pausa o agente.');
@@ -1241,9 +1316,23 @@ function dispararAgente(leadId){
   catch (e) { console.error('[agente] não foi possível disparar para o lead '+leadId+':', e.message); }
 }
 
+// Captura da FAQ: assíncrona de propósito — o clique do BDR não espera a IA, e nada aqui
+// pode derrubar a resolução. Entrada repetida é descartada pelo dedupe do faq.js.
+function dispararFaq(leadId, pendencia, resposta, userId){
+  if (!pendencia) return;
+  setImmediate(() => {
+    faq.gerarDoBdr({ leadId, pendencia, resposta, userId })
+      .then(r => {
+        if (r && r.salvo) log(leadId, userId, 'faq', 'Pergunta recorrente virou FAQ oficial: "'+r.salvo.question+'"');
+        else if (r) console.log('[faq] lead '+leadId+' não gerou entrada — '+r.motivo);
+      })
+      .catch(e => console.error('[faq] falha ao gerar entrada do lead '+leadId+':', e.message));
+  });
+}
+
 // log/notify saem daqui para o followups.js escrever timeline e sino no mesmo formato.
 // Os passos do funil saem para o agentNexus.js executar exatamente o que o humano executa.
-module.exports = { handle, log, notify, leadWithJoins, clientName,
+module.exports = { handle, log, notify, leadWithJoins, clientName, OPCOES_RECUSA_PADRAO,
   triageLead, closeLost, createQuote, savePricingFor, createProposal, promoverProposta, sendProposalEmail,
   logEmailIn, logEmailOut, SIGNATURE_TEXT, SIGNATURE_HTML,
   timestampRecente, assinaturaValida, extraiEmail, stripHtml,

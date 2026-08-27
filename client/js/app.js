@@ -52,6 +52,8 @@ const app = createApp({
       sdr: { configured:false, model:'', agent_enabled:false, agent_off_reason:null },
       // BDR — fila de decisões que o agente Nexus não resolveu sozinho
       bdr: { items:[], count:0 }, bdrDraft:{}, bdrLost:{}, bdrBusy:null, bdrAskLost:null,
+      // FAQ que aprende — respostas oficiais que o agente passa a usar sozinho
+      faq: { items:[], active:0 }, faqNew:{ question:'', answer:'' }, faqEdit:{},
       icp: { segment:'', size:'', region:'', software:'', notes:'', quantity: 8 },
       prospects: [], researching:false, importingId:null,
       genOutreach:false, genQualify:false, outreachTab:'email',
@@ -88,7 +90,11 @@ const app = createApp({
       if (!r.ok) return;
       S.bdr = r.data.data;
       // Mantém o que o BDR já estava escrevendo; só cria rascunho para card novo.
-      S.bdr.items.forEach(l => { if (S.bdrDraft[l.id] === undefined) S.bdrDraft[l.id] = ''; });
+      S.bdr.items.forEach(l => {
+        if (S.bdrDraft[l.id] === undefined) S.bdrDraft[l.id] = '';
+        // Recusa sem motivo: o motivo da perda já vem escrito, para o "Não" ser 1 clique.
+        if (l.bdr_lost_hint && !S.bdrLost[l.id]) S.bdrLost[l.id] = l.bdr_lost_hint;
+      });
     }
     function useBdrOption(lead, opt){ S.bdrDraft[lead.id] = opt; }
     async function resolveBdr(lead, decision){
@@ -118,8 +124,37 @@ const app = createApp({
       if (r.ok) flash(r.data.data.agent_paused ? 'Agente pausado neste lead.' : 'Agente retomado neste lead.');
       await refreshDrawer();
     }
-    const MASK_LABEL = { sdr:'Nexus·SDR', comprador:'Nexus·Comprador', vendedor:'Nexus·Vendedor' };
+    // 'recusa' não é máscara do agente: é o cliente dizendo não na página da proposta.
+    const MASK_LABEL = { sdr:'Nexus·SDR', comprador:'Nexus·Comprador', vendedor:'Nexus·Vendedor', recusa:'Recusa do cliente' };
     function maskLabel(k){ return MASK_LABEL[k] || 'Nexus'; }
+
+    // ---------- FAQ ----------
+    async function loadFaq(){
+      if (!canArea('vendas')) return;
+      const r = await API.get('/api/faq');
+      if (r.ok) S.faq = r.data.data;
+    }
+    async function addFaq(){
+      if (!S.faqNew.question.trim() || !S.faqNew.answer.trim()) { flash('Escreva a pergunta e a resposta.'); return; }
+      const r = await API.post('/api/faq', S.faqNew);
+      if (!r.ok) { flash((r.data && r.data.error && r.data.error.message) || 'Erro ao salvar.'); return; }
+      S.faqNew = { question:'', answer:'' }; await loadFaq(); flash('Pergunta adicionada à FAQ.');
+    }
+    // Edição inline: uma linha por vez, com cópia local até salvar.
+    function editFaq(f){ S.faqEdit = { id:f.id, question:f.question, answer:f.answer }; }
+    function cancelFaqEdit(){ S.faqEdit = {}; }
+    async function saveFaqEdit(){
+      if (!S.faqEdit.id) return;
+      const r = await API.patch('/api/faq/' + S.faqEdit.id, { question:S.faqEdit.question, answer:S.faqEdit.answer });
+      if (!r.ok) { flash((r.data && r.data.error && r.data.error.message) || 'Erro ao salvar.'); return; }
+      S.faqEdit = {}; await loadFaq(); flash('FAQ atualizada.');
+    }
+    async function toggleFaq(f){
+      const r = await API.patch('/api/faq/' + f.id, { active: f.active ? 0 : 1 });
+      if (!r.ok) { flash('Erro ao alterar.'); return; }
+      await loadFaq();
+      flash(f.active ? 'Pergunta desativada — o agente para de usá-la.' : 'Pergunta reativada.');
+    }
     // Aba E-mail do drawer: só as atividades da conversa, em ordem cronológica.
     const emailThread = computed(() => {
       if (!S.drawer) return [];
@@ -334,6 +369,7 @@ const app = createApp({
       if (r === '/usuarios') loadUsers();
       if (r === '/sdr') loadProspects();
       if (r === '/bdr') loadBdr();
+      if (r === '/faq') loadFaq();
     }, { immediate: false });
 
     onMounted(async () => { await bootstrap(); if ((route.value === '/' || route.value === '/dashboard') && S.user) loadReport(); });
@@ -352,7 +388,8 @@ const app = createApp({
       loadNotifications, markNotifRead, propLink, propStatusLabel, copyText, copyProposal, openProposal, sendPropEmail, isOverdue, isToday, srcColor, barPct,
       channelLabel, originBadge,
       loadProspects, runResearch, importProspect, discardProspect, generateOutreach, runQualify, tierColor, fitColor,
-      loadBdr, useBdrOption, resolveBdr, toggleAgentPause, maskLabel, emailThread };
+      loadBdr, useBdrOption, resolveBdr, toggleAgentPause, maskLabel, emailThread,
+      loadFaq, addFaq, editFaq, cancelFaqEdit, saveFaqEdit, toggleFaq };
   },
   template: APP_TEMPLATE(),
 });
