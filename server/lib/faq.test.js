@@ -65,7 +65,7 @@ function leadEscalado(empresa, resumo) {
 }
 
 // ---------- captura ----------
-test('o "sim" do BDR vira entrada de FAQ generalizada, sem bloquear a resposta', async () => {
+test('o "sim" do BDR vira RASCUNHO de FAQ generalizado, sem bloquear a resposta', async () => {
   const lead = leadEscalado('Alfa FAQ', 'Cliente perguntou se a Nexxus emite nota fiscal nacional.');
   respostaLLM = {
     virar_faq: true,
@@ -83,7 +83,9 @@ test('o "sim" do BDR vira entrada de FAQ generalizada, sem bloquear a resposta',
   const entradas = store.all('faq_entries');
   assert.equal(entradas.length, 1);
   assert.equal(entradas[0].question, respostaLLM.question);
-  assert.equal(entradas[0].active, 1);
+  // Nasce INATIVA de propósito: a pergunta vem de texto do cliente processado pela IA —
+  // só entra no prompt do agente depois que alguém do time ativar na tela FAQ.
+  assert.equal(entradas[0].active, 0);
   assert.equal(entradas[0].source_lead_id, lead.id);
   assert.equal(entradas[0].created_by, admin.id);
   assert.ok(!/Acme/.test(entradas[0].answer), 'a resposta oficial não carrega o nome do cliente');
@@ -243,8 +245,48 @@ test('rotas da FAQ: listar, criar, editar e desativar (Vendas/Admin)', async () 
 
   const vazia = await call('PATCH', `/api/faq/${id}`, { question: '   ' });
   assert.equal(vazia.status, 400, 'pergunta vazia não passa');
-  assert.equal((await call('POST', '/api/faq', { question: 'só a pergunta' })).status, 409);
+  assert.equal((await call('POST', '/api/faq', { question: 'só a pergunta' })).status, 400,
+    'sem resposta (ou com tipo errado) é erro de validação');
   assert.equal((await call('PATCH', '/api/faq/9999', { active: 1 })).status, 404);
+});
+
+test('validação estrita das rotas da FAQ: tipos errados não passam', async () => {
+  // Objeto no lugar de texto virava "[object Object]" na base.
+  assert.equal((await call('POST', '/api/faq', { question: { a: 1 }, answer: 'x' })).status, 400);
+  // source_lead_id tem que apontar para lead existente.
+  assert.equal((await call('POST', '/api/faq',
+    { question: 'Pergunta válida sobre nota fiscal?', answer: 'Resposta.', source_lead_id: 9999 })).status, 400);
+  const ok = await call('POST', '/api/faq', { question: 'Vocês dão suporte em português?',
+    answer: 'Sim, durante todo o contrato.' });
+  assert.equal(ok.status, 201);
+  // "false"/"0" como string eram truthy e ATIVAVAM a entrada; agora ou é estrito ou é 400.
+  assert.equal((await call('PATCH', `/api/faq/${ok.body.data.id}`, { active: 'false' })).status, 400);
+  assert.equal((await call('PATCH', `/api/faq/${ok.body.data.id}`, { active: '0' })).body.data.active, 0);
+  assert.equal((await call('PATCH', `/api/faq/${ok.body.data.id}`, { active: true })).body.data.active, 1);
+});
+
+test('editar ou reativar passa pelo mesmo dedupe da criação', async () => {
+  const a = await call('POST', '/api/faq', { question: 'Vocês emitem nota fiscal nacional da compra?',
+    answer: 'Sim, faturada no Brasil.' });
+  const b = await call('POST', '/api/faq', { question: 'Qual o prazo de entrega das licenças?',
+    answer: 'Até 2 dias úteis após o pagamento.' });
+  assert.equal(a.status, 201); assert.equal(b.status, 201);
+
+  // Editar B deixando a pergunta igual à de A: 409, senão o agente recebe as duas.
+  const clone = await call('PATCH', `/api/faq/${b.body.data.id}`,
+    { question: 'Vocês emitem nota fiscal nacional da compra de licenças?' });
+  assert.equal(clone.status, 409);
+  assert.equal(clone.body.data.repetidaDe, a.body.data.id);
+
+  // Desativar A, criar A2 equivalente, e tentar REATIVAR A: mesmo 409.
+  await call('PATCH', `/api/faq/${a.body.data.id}`, { active: 0 });
+  const a2 = await call('POST', '/api/faq', { question: 'A compra vem com nota fiscal nacional?',
+    answer: 'Sim, com NF-e brasileira.' });
+  assert.equal(a2.status, 201);
+  const reativa = await call('PATCH', `/api/faq/${a.body.data.id}`, { active: 1 });
+  assert.equal(reativa.status, 409, 'reativar duplicando entrada ativa equivalente não passa');
+  // Editar a própria entrada sem mudar a pergunta continua livre (não colide consigo mesma).
+  assert.equal((await call('PATCH', `/api/faq/${a2.body.data.id}`, { answer: 'Sim — NF-e nacional.' })).status, 200);
 });
 
 test('quem não é de Vendas nem Admin não vê nem escreve na FAQ', async () => {

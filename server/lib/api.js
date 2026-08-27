@@ -60,7 +60,11 @@ function closeWon(leadId, userId, opts) {
   const before = S.get('leads', leadId); if (!before) return null;
   if (before.status !== 'open') return { skipped: before.status, lead: leadWithJoins(leadId) };
   // lost_reason zerado: lead reaberto depois de perdido não pode fechar carregando o motivo antigo.
-  const patch = { status:'won', lost_reason:null, updated_at:S.now() };
+  // bdr_* zerados: ganhou, não há mais nada para o BDR decidir — um card velho da fila não
+  // pode reverter o negócio ganho para perdido (achado crítico da revisão de 27/08).
+  const patch = { status:'won', lost_reason:null, updated_at:S.now(),
+    needs_bdr:0, bdr_hold:0, bdr_summary:null, bdr_options:[], bdr_mask:null,
+    bdr_suggest_lost:0, bdr_lost_hint:null, bdr_prop_id:null };
   if (opts.value != null && (opts.setValue || !before.estimated_value)) patch.estimated_value = opts.value;
   S.update('leads', leadId, patch);
   const lead = leadWithJoins(leadId);
@@ -753,6 +757,12 @@ async function handle(req) {
     if (!canArea(user,'vendas')) return forbidden('Apenas Vendas/Admin decide na fila do BDR.');
     const id=+m[1]; const lead = S.get('leads', id); if (!lead) return notfound();
     if (!lead.needs_bdr) return { status:409, body:{ success:false, error:{ message:'Este lead não está aguardando decisão do BDR.' } } };
+    if (lead.status !== 'open')
+      return { status:409, body:{ success:false, error:{ message:'Este negócio já foi encerrado — atualize a fila do BDR.' } } };
+    // bdr_at é a "versão" da pendência: tela carregada antes de uma escalação mais nova
+    // não pode resolver a pendência errada.
+    if (body.bdr_at && lead.bdr_at && String(body.bdr_at) !== String(lead.bdr_at))
+      return { status:409, body:{ success:false, error:{ message:'A pendência deste lead mudou desde que a tela foi carregada — atualize a fila do BDR.' } } };
     const decision = String(body.decision||'').toLowerCase();
 
     if (decision==='no') {
@@ -840,21 +850,50 @@ async function handle(req) {
   }
   if (method==='POST' && path==='/api/faq') {
     if (!canArea(user,'vendas')) return forbidden('Apenas Vendas/Admin escreve na FAQ.');
+    if (typeof body.question !== 'string' || typeof body.answer !== 'string')
+      return { status:400, body:{ success:false, error:{ message:'Pergunta e resposta devem ser texto.' } } };
+    let srcLead = null;
+    if (body.source_lead_id != null && body.source_lead_id !== '') {
+      const sid = Number(body.source_lead_id);
+      if (!Number.isInteger(sid) || sid <= 0 || !S.get('leads', sid))
+        return { status:400, body:{ success:false, error:{ message:'source_lead_id não aponta para um lead existente.' } } };
+      srcLead = sid;
+    }
     const r = faq.salvarSeNova({ question:body.question, answer:body.answer,
-      sourceLeadId: body.source_lead_id||null, createdBy:user.id });
+      sourceLeadId: srcLead, createdBy:user.id });
     if (!r.salvo) return { status:409, body:{ success:false, error:{ message:'Não foi salvo: '+r.motivo+'.' },
       data:{ repetidaDe: r.repetidaDe||null } } };
     return { status:201, body:{ success:true, data: r.salvo } };
   }
   if ((m=P(/^\/api\/faq\/(\d+)$/)) && method==='PATCH') {
     if (!canArea(user,'vendas')) return forbidden('Apenas Vendas/Admin edita a FAQ.');
-    const id=+m[1]; if (!S.get('faq_entries', id)) return notfound();
+    const id=+m[1]; const atual = S.get('faq_entries', id); if (!atual) return notfound();
     const patch = {};
-    if (body.question !== undefined) patch.question = String(body.question||'').trim().slice(0, faq.MAX_PERGUNTA);
-    if (body.answer !== undefined) patch.answer = String(body.answer||'').trim().slice(0, faq.MAX_RESPOSTA);
-    if (body.active !== undefined) patch.active = body.active ? 1 : 0;
+    if (body.question !== undefined) {
+      if (typeof body.question !== 'string') return { status:400, body:{ success:false, error:{ message:'Pergunta deve ser texto.' } } };
+      patch.question = body.question.trim().slice(0, faq.MAX_PERGUNTA);
+    }
+    if (body.answer !== undefined) {
+      if (typeof body.answer !== 'string') return { status:400, body:{ success:false, error:{ message:'Resposta deve ser texto.' } } };
+      patch.answer = body.answer.trim().slice(0, faq.MAX_RESPOSTA);
+    }
+    if (body.active !== undefined) {
+      // Estrito de propósito: "false"/"0" são truthy e ativariam a entrada sem querer.
+      if (body.active === true || body.active === 1 || body.active === '1') patch.active = 1;
+      else if (body.active === false || body.active === 0 || body.active === '0') patch.active = 0;
+      else return { status:400, body:{ success:false, error:{ message:'active deve ser booleano ou 0/1.' } } };
+    }
     if (patch.question === '' || patch.answer === '')
       return { status:400, body:{ success:false, error:{ message:'Pergunta e resposta não podem ficar vazias.' } } };
+    // Mesmo dedupe da criação: editar a pergunta ou reativar não pode produzir duas
+    // entradas ativas equivalentes (o agente receberia as duas, até conflitantes).
+    const perguntaFinal = patch.question !== undefined ? patch.question : atual.question;
+    const ficaAtiva = patch.active !== undefined ? patch.active : (atual.active ? 1 : 0);
+    if (ficaAtiva) {
+      const igual = faq.repetidaDe(perguntaFinal, id);
+      if (igual) return { status:409, body:{ success:false, error:{ message:'Já existe entrada ativa muito parecida (#'+igual.id+').' },
+        data:{ repetidaDe: igual.id } } };
+    }
     patch.updated_at = S.now();
     return { status:200, body:{ success:true, data: S.update('faq_entries', id, patch) } };
   }
@@ -1318,15 +1357,23 @@ function dispararAgente(leadId){
 
 // Captura da FAQ: assíncrona de propósito — o clique do BDR não espera a IA, e nada aqui
 // pode derrubar a resolução. Entrada repetida é descartada pelo dedupe do faq.js.
+// Se o processo reiniciar no meio, a captura se perde — mas a matéria-prima fica no lead
+// (bdr_last_pendencia/bdr_last_answer) e a falha aparece na timeline para refazer à mão.
 function dispararFaq(leadId, pendencia, resposta, userId){
   if (!pendencia) return;
   setImmediate(() => {
     faq.gerarDoBdr({ leadId, pendencia, resposta, userId })
       .then(r => {
-        if (r && r.salvo) log(leadId, userId, 'faq', 'Pergunta recorrente virou FAQ oficial: "'+r.salvo.question+'"');
+        if (r && r.salvo) {
+          log(leadId, userId, 'faq', 'Sugestão de FAQ criada a partir desta resposta: "'+r.salvo.question+'" — aguardando aprovação na tela FAQ.');
+          notify('faq_draft', 'Nova sugestão de FAQ aguardando aprovação — ative-a na tela FAQ para o agente passar a usá-la.', leadId);
+        }
         else if (r) console.log('[faq] lead '+leadId+' não gerou entrada — '+r.motivo);
       })
-      .catch(e => console.error('[faq] falha ao gerar entrada do lead '+leadId+':', e.message));
+      .catch(e => {
+        console.error('[faq] falha ao gerar entrada do lead '+leadId+':', e.message);
+        log(leadId, userId, 'faq', 'A IA falhou ao transformar esta resposta em FAQ ('+e.message+') — se a dúvida for recorrente, cadastre manualmente na tela FAQ.');
+      });
   });
 }
 

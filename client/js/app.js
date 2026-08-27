@@ -99,7 +99,8 @@ const app = createApp({
     function useBdrOption(lead, opt){ S.bdrDraft[lead.id] = opt; }
     async function resolveBdr(lead, decision){
       if (S.bdrBusy) return;
-      const payload = { decision };
+      // bdr_at identifica QUAL pendência esta tela viu; o servidor rejeita se mudou.
+      const payload = { decision, bdr_at: lead.bdr_at || null };
       if (decision === 'yes') {
         const msg = (S.bdrDraft[lead.id] || '').trim() || lead.bdr_options[0] || '';
         if (!msg) { flash('Escolha ou escreva a resposta que vai para o cliente.'); return; }
@@ -362,17 +363,19 @@ const app = createApp({
     async function addProduct(){ if(!S.newProduct.name)return; const r=await API.post('/api/products', S.newProduct); if(r.ok){ S.newProduct={supplier_id:'',name:'',sku:'',list_cost_usd:''}; await loadCatalog(); flash('Produto adicionado.'); } }
     async function addUser(){ if(!S.newUser.name||!S.newUser.email)return; const r=await API.post('/api/users', S.newUser); if(r.ok){ S.newUser={name:'',email:'',password:'senha123',area:'vendas',role:'user'}; await loadUsers(); flash('Usuário criado.'); } else flash((r.data&&r.data.error&&r.data.error.message)||'Sem permissão.'); }
 
-    // route-driven loads
-    watch(route, (r) => {
+    // route-driven loads — a mesma função roda na troca de rota E no primeiro carregamento,
+    // senão recarregar direto em #/faq (ou #/bdr etc.) mostra a tela vazia.
+    function loadRoute(r){
       if (r === '/' || r === '/dashboard') loadReport();
       if (r === '/tarefas') loadTasks();
       if (r === '/usuarios') loadUsers();
       if (r === '/sdr') loadProspects();
       if (r === '/bdr') loadBdr();
       if (r === '/faq') loadFaq();
-    }, { immediate: false });
+    }
+    watch(route, loadRoute, { immediate: false });
 
-    onMounted(async () => { await bootstrap(); if ((route.value === '/' || route.value === '/dashboard') && S.user) loadReport(); });
+    onMounted(async () => { await bootstrap(); if (S.user) loadRoute(route.value); });
     // FX auto-refresh a cada 5 min
     setInterval(() => { if (S.user) loadFx(); }, 300000);
     // O sino e a fila do BDR andam juntos: o badge do menu não pode ficar velho.

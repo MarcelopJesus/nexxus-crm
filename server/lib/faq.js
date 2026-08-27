@@ -2,9 +2,9 @@
 // quem responde passa a ser o SDR, não cai mais no BDR").
 //
 // O ciclo é: o BDR responde uma pendência → o par pergunta/resposta é GENERALIZADO pela
-// IA (sem nome de cliente, sem quantidade específica) e vira entrada ativa → o contexto
-// do agente passa a carregar essas respostas oficiais → na próxima vez que a mesma dúvida
-// aparecer, a máscara SDR responde sozinha em vez de escalar.
+// IA (sem nome de cliente, sem quantidade específica) e vira RASCUNHO inativo → alguém do
+// time aprova (ativa) na tela FAQ → o contexto do agente passa a carregar essas respostas
+// oficiais → na próxima vez que a mesma dúvida aparecer, a máscara SDR responde sozinha.
 //
 // Nada aqui bloqueia o clique do BDR: a geração é assíncrona e falha em silêncio (log).
 'use strict';
@@ -52,7 +52,10 @@ function pareceRepetida(a, b) {
 function byCreatedDesc(a, b) { return String(b.created_at || '').localeCompare(String(a.created_at || '')) || (b.id - a.id); }
 function ativas() { return S.find('faq_entries', f => f.active).sort(byCreatedDesc); }
 function todas() { return S.all('faq_entries').sort(byCreatedDesc); }
-function repetidaDe(pergunta) { return ativas().find(f => pareceRepetida(f.question, pergunta)) || null; }
+// ignorarId: no PATCH a entrada não pode colidir consigo mesma.
+function repetidaDe(pergunta, ignorarId) {
+  return ativas().find(f => f.id !== ignorarId && pareceRepetida(f.question, pergunta)) || null;
+}
 
 // ---------- escrita ----------
 // Devolve { salvo } ou { salvo:null, motivo } — nunca lança: quem chama é fluxo de fundo.
@@ -64,7 +67,8 @@ function salvarSeNova(o) {
   if (igual) return { salvo: null, motivo: 'já existe entrada ativa muito parecida (#' + igual.id + ')', repetidaDe: igual.id };
   const row = S.insert('faq_entries', {
     question: question.slice(0, MAX_PERGUNTA), answer: answer.slice(0, MAX_RESPOSTA),
-    source_lead_id: (o && o.sourceLeadId) || null, created_by: (o && o.createdBy) || null, active: 1,
+    source_lead_id: (o && o.sourceLeadId) || null, created_by: (o && o.createdBy) || null,
+    active: (o && o.ativo === false) ? 0 : 1,
   });
   return { salvo: row };
 }
@@ -139,7 +143,10 @@ async function gerarDoBdr(o) {
     schemaName: 'entrada_faq', schema: FAQ_SCHEMA, maxTokens: 1500,
   });
   if (!out.virar_faq) return { salvo: null, motivo: 'caso específico demais — ' + (out.reason || 'sem justificativa') };
-  return salvarSeNova({ question: out.question, answer: out.answer,
+  // ativo:false — a pergunta nasce do texto do CLIENTE passado pela IA. Se entrasse ativa
+  // direto, um motivo de recusa malicioso poderia plantar instrução persistente no prompt
+  // que responde OUTROS leads. Gente da casa aprova (ativa) na tela FAQ antes de valer.
+  return salvarSeNova({ question: out.question, answer: out.answer, ativo: false,
     sourceLeadId: (o && o.leadId) || null, createdBy: (o && o.userId) || null });
 }
 

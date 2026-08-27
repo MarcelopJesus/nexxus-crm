@@ -198,6 +198,58 @@ test('IA que falha ou devolve lixo deixa as opções fixas de pé — a rota nun
   assert.deepEqual(d.bdr_options, api.OPCOES_RECUSA_PADRAO);
 });
 
+// Aceite público da mesma proposta, para os testes de corrida recusa×aceite.
+const aceitar = (token) =>
+  handle({ method: 'POST', path: `/api/public/proposals/${token}/accept`,
+    body: {}, user: null, query: {}, headers: { host: 'localhost:3001' } });
+
+test('aceite depois da recusa limpa a fila do BDR — card velho não reverte o negócio ganho', async () => {
+  const { lead, prop } = leadComProposta('Theta Recusa', 42000);
+  await recusar(prop.token, 'Preciso pensar melhor.');
+  await tique();
+  assert.equal(store.get('leads', lead.id).needs_bdr, 1);
+
+  // O cliente muda de ideia e aceita pelo MESMO link. O negócio fecha ganho...
+  const ac = await aceitar(prop.token);
+  assert.equal(ac.status, 200);
+  const ganho = store.get('leads', lead.id);
+  assert.equal(ganho.status, 'won');
+  // ...e a pendência do BDR morre junto: não há mais nada para decidir.
+  assert.equal(ganho.needs_bdr, 0);
+  assert.equal(ganho.bdr_prop_id, null);
+  assert.equal((await naFila()).filter(i => i.id === lead.id).length, 0);
+
+  // A tela do BDR carregada ANTES do aceite tenta o "Não": tem que bater em 409,
+  // não reverter o ganho nem cancelar o contrato.
+  const velho = await call('POST', `/api/bdr/${lead.id}/resolve`, { decision: 'no', lost_reason: 'Descartado' });
+  assert.equal(velho.status, 409);
+  assert.equal(store.get('leads', lead.id).status, 'won', 'o ganho fica de pé');
+  assert.ok(store.find('contracts', c => c.lead_id === lead.id).every(c => c.status !== 'cancelled'),
+    'o contrato do jurídico não é cancelado por um clique atrasado');
+});
+
+test('decisão do BDR com bdr_at antigo é rejeitada — a tela velha não resolve pendência mais nova', async () => {
+  const { lead, prop } = leadComProposta('Iota Recusa');
+  await recusar(prop.token, 'Está caro.');
+  await tique();
+  const antigo = store.get('leads', lead.id).bdr_at;
+
+  // Uma pendência mais nova substitui a que a tela viu (timestamp fixo: store.now()
+  // dentro do mesmo instante geraria o MESMO valor e o teste não testaria nada).
+  store.update('leads', lead.id, { bdr_at: '2099-01-01T00:00:00.000Z', bdr_summary: 'Pendência mais nova' });
+
+  const r = await call('POST', `/api/bdr/${lead.id}/resolve`,
+    { decision: 'yes', message: 'Resposta pensada para a pendência antiga.', bdr_at: antigo });
+  assert.equal(r.status, 409);
+  assert.equal(store.get('leads', lead.id).needs_bdr, 1, 'a pendência nova continua na fila');
+  assert.equal(enviados.length, 0, 'nenhum e-mail sai com resposta da pendência errada');
+
+  // Com o bdr_at atual (tela atualizada) a decisão passa.
+  const ok = await call('POST', `/api/bdr/${lead.id}/resolve`,
+    { decision: 'yes', message: 'Resposta certa.', bdr_at: store.get('leads', lead.id).bdr_at });
+  assert.equal(ok.status, 200);
+});
+
 test('o BDR que resolve antes da IA chegar não tem as opções trocadas debaixo do pé', async () => {
   llmLigado = true;
   const { lead, prop } = leadComProposta('Eta Recusa');
