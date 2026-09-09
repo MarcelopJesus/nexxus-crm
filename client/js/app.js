@@ -40,7 +40,7 @@ const app = createApp({
       leads: [], accounts: [], contacts: [], suppliers: [], products: [], tasks: [], users: [],
       config: null, report: null,
       // ui
-      toast: '', drawer: null, drawerTab: 'resumo', showNewLead: false, dragId: null, dragOver: null,
+      toast: '', popups: [], drawer: null, drawerTab: 'resumo', showNewLead: false, dragId: null, dragOver: null,
       notif: { items: [], unread: 0 }, showNotif: false,
       newLead: { title:'', account_id:'', contact_id:'', product_id:'', requested_software:'', qty:1, source:'site', notes:'' },
       quoteForm: { supplier_id:'', product_id:'', cost_amount:'', cost_currency:'USD', qty:1, supplier_ref:'', notes:'' },
@@ -81,7 +81,55 @@ const app = createApp({
     async function loadConfig(){ const r = await API.get('/api/config/pricing'); if (r.ok) S.config = r.data.data; }
     async function loadTasks(){ const r = await API.get('/api/tasks'); if (r.ok) S.tasks = r.data.data; }
     async function loadUsers(){ const r = await API.get('/api/users'); if (r.ok) S.users = r.data.data; }
-    async function loadNotifications(){ const r = await API.get('/api/notifications'); if (r.ok) S.notif = r.data.data; }
+    // ---------- Avisos que sobem sozinhos (M29) ----------
+    // Ítalo, 02/09: quer o pop-up do CRM da Monofloor, subindo na hora em que o cliente
+    // abre a proposta — hoje o card só mudava no refresh. A notificação já existia no
+    // sino; o que faltava era ela aparecer sem ninguém recarregar a página.
+    //
+    // Sem infraestrutura nova: a mesma consulta que já rodava a cada 30s passa a rodar a
+    // cada 15s, e o que chega de NOVO vira pop-up. O funil recarrega junto, para o card
+    // andar na tela no mesmo instante em que o aviso sobe.
+    const AVISO_ALTO = {
+      proposal_viewed:      { titulo:'Proposta aberta pelo cliente', cor:'#0071E3', icone:'👀' },
+      proposal_accepted:    { titulo:'Proposta ACEITA',              cor:'#34C759', icone:'🎉' },
+      proposal_rejected:    { titulo:'Proposta recusada',            cor:'#FF3B30', icone:'✕'  },
+      proposal_send_failed: { titulo:'Proposta NÃO saiu por e-mail', cor:'#FF3B30', icone:'⚠️' },
+      email_in:             { titulo:'Cliente respondeu',            cor:'#5856D6', icone:'✉️' },
+      lead_new:             { titulo:'Novo lead',                    cor:'#0071E3', icone:'✨' },
+      bdr_action:           { titulo:'Precisa de você (BDR)',        cor:'#FF9500', icone:'🙋' },
+      order_paid:           { titulo:'Pedido pago',                  cor:'#34C759', icone:'💰' },
+      won:                  { titulo:'Negócio ganho',                cor:'#34C759', icone:'🏆' },
+    };
+    // O maior id já visto. Começa no maior da primeira carga: abrir o CRM não pode
+    // despejar na tela todo aviso acumulado desde ontem.
+    let ultimoAvisoVisto = null;
+    function dispensarPopup(p){ S.popups = S.popups.filter(x => x.id !== p.id); }
+    function empilharPopups(itens){
+      for (const n of itens) {
+        const cfg = AVISO_ALTO[n.type]; if (!cfg) continue;
+        const p = Object.assign({}, n, cfg);
+        S.popups.unshift(p);
+        // Some sozinho em 12s — tempo de ler sem virar entulho na tela.
+        setTimeout(() => dispensarPopup(p), 12000);
+      }
+      S.popups = S.popups.slice(0, 4);
+    }
+    async function loadNotifications(){
+      const r = await API.get('/api/notifications');
+      if (!r.ok) return;
+      const antes = ultimoAvisoVisto;
+      S.notif = r.data.data;
+      const itens = S.notif.items || [];
+      const maiorId = itens.reduce((mx, n) => Math.max(mx, n.id), 0);
+      if (antes === null) { ultimoAvisoVisto = maiorId; return; }   // primeira carga: nada de pop-up
+      const novos = itens.filter(n => n.id > antes).sort((a,b) => a.id - b.id);
+      ultimoAvisoVisto = Math.max(maiorId, antes);
+      if (!novos.length) return;
+      empilharPopups(novos);
+      // O card tem de andar na tela junto com o aviso, sem ninguém arrastar nada.
+      await loadLeads();
+      if (S.drawer && novos.some(n => n.lead_id === S.drawer.lead.id)) await openLead(S.drawer.lead.id);
+    }
     // ---------- SDR Agent ----------
     async function loadSdrStatus(){ const r = await API.get('/api/sdr/status'); if (r.ok) S.sdr = r.data.data; }
     // ---------- BDR ----------
@@ -461,7 +509,8 @@ const app = createApp({
     // FX auto-refresh a cada 5 min
     setInterval(() => { if (S.user) loadFx(); }, 300000);
     // O sino e a fila do BDR andam juntos: o badge do menu não pode ficar velho.
-    setInterval(() => { if (S.user) { loadNotifications(); loadBdr(); } }, 30000);
+    // 15s: o Ítalo precisa ver o aviso "na hora"; abaixo disso vira conversa fiada com o servidor.
+    setInterval(() => { if (S.user) { loadNotifications(); loadBdr(); } }, 15000);
 
     const filteredContacts = computed(() => S.newLead.account_id ? S.contacts.filter(c => c.account_id == S.newLead.account_id) : S.contacts);
 
@@ -470,7 +519,7 @@ const app = createApp({
       triage, toggleHot, addNote, submitQuote, runPricing, savePricing, sendProposal, closeLead,
       toggleTask, toggleTaskRow, updateContract, latestPricing, saveConfig, addSupplier, addProduct, addUser,
       loadReport, loadTasks, loadUsers, filteredContacts,
-      loadNotifications, markNotifRead, propLink, propStatusLabel, copyText, copyProposal, openProposal, sendPropEmail, isOverdue, isToday, srcColor, barPct,
+      loadNotifications, markNotifRead, dispensarPopup, propLink, propStatusLabel, copyText, copyProposal, openProposal, sendPropEmail, isOverdue, isToday, srcColor, barPct,
       channelLabel, originBadge,
       loadProspects, runResearch, importProspect, discardProspect, generateOutreach, runQualify, tierColor, fitColor,
       loadBdr, useBdrOption, resolveBdr, toggleAgentPause, maskLabel, emailThread, timelineItems,

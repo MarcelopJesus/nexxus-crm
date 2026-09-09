@@ -118,6 +118,21 @@ table.tbl { width:100%; border-collapse:collapse; }
 .price-box .pb-v{ font-size:26px; font-weight:800; margin-top:4px; }
 .small{ font-size:12px;} .mono{ font-variant-numeric: tabular-nums; }
 .toast{ position:fixed; bottom:22px; left:50%; transform:translateX(-50%); background:var(--nx-sidebar); color:#fff; padding:12px 20px; border-radius:10px; box-shadow:var(--nx-shadow-lg); z-index:80; font-weight:600; font-size:13.5px; }
+/* Pop-ups de evento em tempo real (M29) — canto superior direito, empilhados, some
+   sozinho em 12s. Fica ACIMA do drawer de propósito: o cliente pode abrir a proposta
+   enquanto o vendedor está com outro lead na tela. */
+.popups{ position:fixed; top:16px; right:16px; z-index:120; display:flex; flex-direction:column; gap:10px; max-width:min(360px, calc(100vw - 32px)); }
+.popup{ position:relative; background:var(--nx-surface, #fff); border:1px solid var(--nx-border); border-left:4px solid #0071E3;
+  border-radius:12px; padding:13px 34px 13px 15px; box-shadow:var(--nx-shadow-lg); cursor:pointer;
+  animation:popup-in .28s cubic-bezier(.2,.9,.3,1.2); }
+.popup:hover{ transform:translateY(-1px); }
+.popup-title{ font-weight:700; font-size:13px; display:flex; align-items:center; gap:7px; }
+.popup-ic{ font-size:15px; }
+.popup-msg{ font-size:12.5px; line-height:1.45; color:var(--nx-text-mute, #6e6e73); margin-top:4px; }
+.popup-x{ position:absolute; top:8px; right:9px; border:0; background:none; cursor:pointer; color:var(--nx-text-mute, #86868B); font-size:13px; line-height:1; padding:2px 4px; }
+@keyframes popup-in{ from{ opacity:0; transform:translateX(24px);} to{ opacity:1; transform:none;} }
+@media (max-width: 900px){ .popups{ left:12px; right:12px; max-width:none; } }
+
 .flex{ display:flex;} .between{ justify-content:space-between;} .center{ align-items:center;} .gap{ gap:10px;} .wrap{ flex-wrap:wrap;}
 .mt{ margin-top:16px;} .mb{ margin-bottom:16px;}
 .bar{ height:10px; border-radius:6px; background:var(--nx-surface-2); overflow:hidden;} .bar > span{ display:block; height:100%; background:var(--nx-gradient);}

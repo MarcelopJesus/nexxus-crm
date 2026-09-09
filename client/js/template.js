@@ -489,6 +489,17 @@ function APP_TEMPLATE() { return `
 ${DRAWER_TEMPLATE()}
 ${NEWLEAD_TEMPLATE()}
 <div v-if="S.toast" class="toast">{{ S.toast }}</div>
+
+<!-- Pop-ups que sobem sozinhos (M29): o aviso do cliente abrindo a proposta chega sem
+     ninguém recarregar a página. Clicar abre a oportunidade direto. -->
+<div class="popups">
+  <div v-for="p in S.popups" :key="p.id" class="popup" :style="{borderLeftColor: p.cor}"
+       @click="p.lead_id && openLead(p.lead_id); dispensarPopup(p)">
+    <button class="popup-x" @click.stop="dispensarPopup(p)" title="Dispensar">✕</button>
+    <div class="popup-title"><span class="popup-ic">{{ p.icone }}</span>{{ p.titulo }}</div>
+    <div class="popup-msg">{{ p.message }}</div>
+  </div>
+</div>
 `; }
 
 function DRAWER_TEMPLATE() { return `
