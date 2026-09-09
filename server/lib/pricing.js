@@ -17,6 +17,7 @@ function round2(n) { return Math.round((n + Number.EPSILON) * 100) / 100; }
  * @param {number} p.importTaxPct   impostos de importação (ex.: 0.15)
  * @param {number} p.invoiceTaxPct  impostos da NF de venda (ex.: 0.10)
  * @param {number} p.targetMarginPct margem alvo (ex.: 0.20)
+ * @param {number} p.okMarginPct    margem aceitável, o meio-termo da negociação (ex.: 0.15)
  * @param {number} p.minMarginPct   margem mínima/piso (ex.: 0.10)
  */
 function calculatePricing(p) {
@@ -28,6 +29,12 @@ function calculatePricing(p) {
   const invoiceTax = Number(p.invoiceTaxPct || 0);
   const targetMargin = Number(p.targetMarginPct || 0);
   const minMargin = Number(p.minMarginPct || 0);
+  // Terceiro nível (M30, decisão de 02/09: sugerido, aceitável e piso). Quando a margem
+  // aceitável não está configurada, ela nasce no meio do caminho entre alvo e mínima —
+  // assim uma instalação antiga não fica sem o nível do meio.
+  const okMargin = p.okMarginPct == null || p.okMarginPct === ''
+    ? (targetMargin + minMargin) / 2
+    : Number(p.okMarginPct);
 
   const costBrl = costUsd * fxRate;
   const costWithImport = costBrl * (1 + importTax);
@@ -39,6 +46,7 @@ function calculatePricing(p) {
   }
 
   const suggested = priceForMargin(targetMargin);
+  const acceptable = priceForMargin(okMargin);
   const min = priceForMargin(minMargin);
 
   return {
@@ -49,10 +57,12 @@ function calculatePricing(p) {
     importTaxPct: importTax,
     invoiceTaxPct: invoiceTax,
     targetMarginPct: targetMargin,
+    okMarginPct: okMargin,
     minMarginPct: minMargin,
     costBrl: round2(costBrl),
     costWithImport: round2(costWithImport),
     suggestedPrice: suggested == null ? null : round2(suggested),
+    acceptablePrice: acceptable == null ? null : round2(acceptable),
     minPrice: min == null ? null : round2(min),
     valid: suggested != null && min != null,
   };

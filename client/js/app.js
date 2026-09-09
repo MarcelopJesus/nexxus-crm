@@ -36,6 +36,7 @@ const app = createApp({
       // data
       meta: { stages: [], areas: [], users: [] },
       chatSessions: [],
+      negOpcao: null, negTexto: '', negAbaixoPiso: false, negEnviando: false,
       fx: { rate: null, source: '', ts: 0 },
       leads: [], accounts: [], contacts: [], suppliers: [], products: [], tasks: [], users: [],
       config: null, report: null,
@@ -266,6 +267,36 @@ const app = createApp({
             : (a.email_from || 'Cliente'),
         }));
     });
+    // ---------- Negociação de desconto (M30) ----------
+    // As três respostas que o agente montou aguardando a escolha do vendedor. Ele pode
+    // editar o texto antes de mandar — a decisão de 02/09 é "num primeiro momento um
+    // humano escolhe", não "um humano obedece".
+    const pendenciaEmail = computed(() => {
+      const l = S.drawer && S.drawer.lead;
+      const opts = l && Array.isArray(l.email_pending_options) ? l.email_pending_options : [];
+      return opts.length ? { resumo: l.email_pending_summary, at: l.email_pending_at, opcoes: opts } : null;
+    });
+    function escolherOpcao(i){ S.negOpcao = i; S.negTexto = pendenciaEmail.value.opcoes[i].body; }
+    async function enviarRespostaNegociacao(){
+      if (S.negOpcao == null) { flash('Escolha uma das três respostas.'); return; }
+      S.negEnviando = true;
+      const r = await API.post('/api/leads/' + S.drawer.lead.id + '/negociacao/responder',
+        { indice: S.negOpcao, texto: S.negTexto, approve_below_floor: S.negAbaixoPiso });
+      S.negEnviando = false;
+      if (r.status === 422) { flash(r.data.error.message); S.negAbaixoPiso = false; return; }
+      if (!r.ok) { flash((r.data && r.data.error && r.data.error.message) || 'Erro ao responder.'); return; }
+      if (r.data.data.send_failed) { flash('⚠️ O e-mail NÃO saiu (' + r.data.data.send_failed + '). Nada foi alterado — tente de novo.'); return; }
+      flash(r.data.data.proposta ? 'Resposta enviada com a proposta nova.' : 'Resposta enviada ao cliente.');
+      S.negOpcao = null; S.negTexto = '';
+      await refreshDrawer();
+    }
+    async function descartarNegociacao(){
+      await API.post('/api/leads/' + S.drawer.lead.id + '/negociacao/descartar', {});
+      S.negOpcao = null; S.negTexto = '';
+      flash('Respostas descartadas.');
+      await refreshDrawer();
+    }
+
     // Chat do site que ainda não virou oportunidade.
     async function loadChatSessions(){ const r = await API.get('/api/chat-sessions'); if (r.ok) S.chatSessions = r.data.data; }
     async function promoverChat(c){
@@ -428,6 +459,7 @@ const app = createApp({
           cost_currency:'USD', qty: S.drawer.lead.qty || 1, supplier_ref:'', notes:'' };
         aplicaCustoCatalogo();
         S.propInput = { final_price:'', approve_below_floor:false }; S.closeForm = { result:'', lost_reason:'' };
+        S.negOpcao = null; S.negTexto = ''; S.negAbaixoPiso = false;
       }
     }
     async function refreshDrawer(){ if (S.drawer) await openLead(S.drawer.lead.id); await loadLeads(); }
@@ -524,6 +556,7 @@ const app = createApp({
       loadProspects, runResearch, importProspect, discardProspect, generateOutreach, runQualify, tierColor, fitColor,
       loadBdr, useBdrOption, resolveBdr, toggleAgentPause, maskLabel, emailThread, timelineItems,
       loadChatSessions, promoverChat,
+      pendenciaEmail, escolherOpcao, enviarRespostaNegociacao, descartarNegociacao,
       loadFaq, addFaq, editFaq, cancelFaqEdit, saveFaqEdit, toggleFaq };
   },
   template: APP_TEMPLATE(),

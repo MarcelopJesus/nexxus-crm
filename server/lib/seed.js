@@ -25,7 +25,7 @@ function seedIfEmpty() {
   const vendas = U['vendas'];
 
   store.data.config = { fx_mode:'api', fx_manual_rate:5.20, fx_spread_pct:0.04,
-    import_tax_pct:0.15, invoice_tax_pct:0.10, target_margin_pct:0.20, min_margin_pct:0.10,
+    import_tax_pct:0.15, invoice_tax_pct:0.10, target_margin_pct:0.20, ok_margin_pct:0.15, min_margin_pct:0.10,
     updated_at: store.now() };
 
   const s1 = store.insert('suppliers', { name:'Atlassian', country:'Austrália', currency:'USD' }).id;

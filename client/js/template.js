@@ -156,7 +156,8 @@ function APP_TEMPLATE() { return `
             <div class="col-head"><span><span class="stage-dot" :style="{background:'var(--st-'+s.key+')'}"></span>{{ s.label }}</span><span class="count">{{ (leadsByStage[s.key]||[]).length }}</span></div>
             <div v-for="l in (leadsByStage[s.key]||[])" :key="l.id" class="lead-card" draggable="true"
                  @dragstart="onDragStart(l)" @click="openLead(l.id)">
-              <div class="lc-title">{{ l.title }} <span v-if="l.hot" class="hot-flag">🔥</span></div>
+              <div class="lc-title">{{ l.title }} <span v-if="l.hot" class="hot-flag">🔥</span>
+                <span v-if="l.email_pending_options && l.email_pending_options.length" title="Resposta de negociação aguardando você escolher">✉️</span></div>
               <div v-if="l.bant_score!=null" class="small" style="margin:2px 0"><span class="badge" :style="{background: tierColor(l.bant_tier), color:'#fff', fontSize:'10px'}">BANT {{ l.bant_score }} · {{ l.bant_tier }}</span></div>
               <div class="lc-acc">{{ l.account_name || '—' }}</div>
               <div class="lc-meta">
@@ -431,8 +432,12 @@ function APP_TEMPLATE() { return `
                 <div class="field"><label>Impostos NF venda (%)</label><input v-model.number="S.config.invoice_tax_pct" type="number" step="0.01"/></div>
                 <div class="field"><label>Margem alvo (%)</label><input v-model.number="S.config.target_margin_pct" type="number" step="0.01"/></div>
               </div>
-              <div class="field"><label>Margem mínima / piso (%)</label><input v-model.number="S.config.min_margin_pct" type="number" step="0.01"/></div>
-              <p class="small muted">Percentuais em decimal (ex.: 0.20 = 20%).</p>
+              <div class="row2">
+                <div class="field"><label>Margem aceitável (%)</label><input v-model.number="S.config.ok_margin_pct" type="number" step="0.01"/></div>
+                <div class="field"><label>Margem mínima / piso (%)</label><input v-model.number="S.config.min_margin_pct" type="number" step="0.01"/></div>
+              </div>
+              <p class="small muted">Percentuais em decimal (ex.: 0.20 = 20%). As três margens geram os três níveis de preço da negociação: <b>alvo → preço sugerido</b>, <b>aceitável → até onde o agente pode ceder sozinho</b>, <b>mínima → piso</b>. Abaixo do piso, trava e pede aprovação.</p>
+              <p class="small" style="color:#FF9500"><b>Atenção:</b> estes percentuais ainda são de EXEMPLO. Os números reais de imposto e margem precisam ser preenchidos aqui por você e pelo Ítalo — é o que a proposta usa para calcular o preço do cliente.</p>
               <button class="btn" @click="saveConfig" :disabled="!canArea('financeiro')">Salvar regras</button>
               <span v-if="!canArea('financeiro')" class="small muted" style="margin-left:8px">Somente Financeiro/Admin</span>
             </div>
@@ -698,8 +703,9 @@ function DRAWER_TEMPLATE() { return `
           </div>
           <div v-if="S.priceCalc || latestPricing">
             <div class="price-out">
-              <div class="price-box sugg"><div class="pb-l">Preço de Venda Sugerido</div><div class="pb-v" style="color:var(--nx-primary)">{{ BRL((S.priceCalc||latestPricing).suggestedPrice ?? latestPricing.suggested_price) }}</div><div class="small muted">margem alvo</div></div>
-              <div class="price-box"><div class="pb-l">Preço de Venda Mínimo (piso)</div><div class="pb-v">{{ BRL((S.priceCalc||latestPricing).minPrice ?? latestPricing.min_price) }}</div><div class="small muted">margem mínima aprovada</div></div>
+              <div class="price-box sugg"><div class="pb-l">Preço Sugerido</div><div class="pb-v" style="color:var(--nx-primary)">{{ BRL((S.priceCalc||latestPricing).suggestedPrice ?? latestPricing.suggested_price) }}</div><div class="small muted">margem alvo</div></div>
+              <div class="price-box"><div class="pb-l">Preço Aceitável</div><div class="pb-v" style="color:#FF9500">{{ BRL((S.priceCalc||latestPricing).acceptablePrice ?? latestPricing.acceptable_price) }}</div><div class="small muted">até aqui o agente cede sozinho</div></div>
+              <div class="price-box"><div class="pb-l">Preço Mínimo (piso)</div><div class="pb-v">{{ BRL((S.priceCalc||latestPricing).minPrice ?? latestPricing.min_price) }}</div><div class="small muted">abaixo daqui, trava</div></div>
             </div>
             <table class="tbl mt"><tbody>
               <tr><td>Custo (USD × qtd)</td><td class="mono" style="text-align:right">{{ (S.priceCalc||{}).costUsd ?? latestPricing.cost_usd }}</td></tr>
@@ -715,9 +721,11 @@ function DRAWER_TEMPLATE() { return `
       <div v-if="S.drawerTab==='proposta'">
         <div class="card card-p mb">
           <div class="section-title">Enviar proposta (Vendas)</div>
+          <!-- Os três níveis da decisão de 02/09: sugerido, aceitável e piso. -->
           <div v-if="latestPricing" class="flex gap wrap mb small">
-            <span class="chip">Sugerido: {{ BRL(latestPricing.suggested_price) }}</span>
-            <span class="chip">Piso: {{ BRL(latestPricing.min_price) }}</span>
+            <span class="chip" style="border-color:#34C759">Sugerido: {{ BRL(latestPricing.suggested_price) }}</span>
+            <span class="chip" style="border-color:#FF9500" v-if="latestPricing.acceptable_price">Aceitável: {{ BRL(latestPricing.acceptable_price) }}</span>
+            <span class="chip" style="border-color:#FF3B30">Piso: {{ BRL(latestPricing.min_price) }}</span>
           </div>
           <p v-else class="small muted">Gere a precificação antes para validar o piso.</p>
           <div class="field"><label>Preço final ao cliente (R$)</label><input v-model.number="S.propInput.final_price" type="number" step="0.01" placeholder="0,00"/></div>
@@ -744,6 +752,36 @@ function DRAWER_TEMPLATE() { return `
 
       <!-- E-MAIL — a conversa com o cliente (Patrícia envia, cliente responde) -->
       <div v-if="S.drawerTab==='email'">
+        <!-- Negociação de desconto (M30): três respostas prontas, o vendedor escolhe e
+             pode editar. Preço novo vira proposta V2 no mesmo envio. -->
+        <div v-if="pendenciaEmail" class="card card-p mb" style="border-color:#FF9500;border-left:4px solid #FF9500">
+          <div class="flex between center wrap gap">
+            <div class="section-title" style="margin:0">✉️ Resposta pendente — o cliente negociou preço</div>
+            <span class="muted small">{{ fmtDT(pendenciaEmail.at) }}</span>
+          </div>
+          <p class="small" style="margin:6px 0 12px">{{ pendenciaEmail.resumo }}</p>
+          <div v-for="(o,i) in pendenciaEmail.opcoes" :key="i" class="card card-p mb" style="cursor:pointer"
+               :style="{borderColor: S.negOpcao===i ? 'var(--nx-primary)' : 'var(--nx-border)', background: S.negOpcao===i ? 'rgba(0,113,227,.04)' : ''}"
+               @click="escolherOpcao(i)">
+            <div class="flex between center wrap gap">
+              <b class="small">{{ o.nivel }}</b>
+              <span class="chip val" v-if="o.price">{{ BRL(o.price) }}</span>
+            </div>
+            <div class="small muted" style="white-space:pre-wrap;margin-top:6px">{{ o.body }}</div>
+          </div>
+          <div v-if="S.negOpcao!=null">
+            <div class="field"><label>Texto que vai ao cliente (edite se quiser)</label>
+              <textarea v-model="S.negTexto" rows="6"></textarea></div>
+            <label class="small flex center gap" style="margin-bottom:10px"><input type="checkbox" v-model="S.negAbaixoPiso"/> Aprovar abaixo do piso (só se o CRM travar)</label>
+          </div>
+          <div class="flex gap wrap">
+            <button class="btn" @click="enviarRespostaNegociacao" :disabled="S.negOpcao==null||S.negEnviando">
+              {{ S.negEnviando ? 'Enviando…' : 'Enviar a resposta escolhida' }}</button>
+            <button class="btn btn-ghost" @click="descartarNegociacao">Descartar</button>
+          </div>
+          <p class="small muted" style="margin-top:8px">Preço diferente do atual gera uma <b>proposta V2</b> e ela vai neste mesmo e-mail. Se o envio falhar, nada é alterado.</p>
+        </div>
+
         <div class="card card-p">
           <div class="flex between center">
             <div class="section-title" style="margin:0">Conversa com o cliente — todos os canais</div>

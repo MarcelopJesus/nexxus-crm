@@ -22,7 +22,15 @@ const AREAS = ['vendas','prevendas','compras','produto','marketing','financeiro'
 
 function log(leadId, userId, type, message){ S.insert('activities', { lead_id:leadId, user_id:userId||null, type, message }); }
 function touchLead(id){ S.update('leads', id, { updated_at: S.now() }); }
-function getConfig(){ return S.data.config; }
+// A margem aceitável (M30) chegou depois: instalação antiga não tem o campo gravado.
+// Em vez de espalhar fallback por todo lado, ele é preenchido aqui, na única porta por
+// onde a configuração sai — meio do caminho entre a margem alvo e a mínima.
+function getConfig(){
+  const c = S.data.config;
+  if (c && (c.ok_margin_pct == null || c.ok_margin_pct === ''))
+    c.ok_margin_pct = (Number(c.target_margin_pct||0) + Number(c.min_margin_pct||0)) / 2;
+  return c;
+}
 function byId(coll){ const m={}; S.data[coll].forEach(r=>m[r.id]=r); return m; }
 // Nome do cliente para a notificação — lead sem empresa cadastrada não vira "null".
 function clientName(lead){ return (lead && (lead.account_name || lead.contact_name || lead.title)) || 'Cliente'; }
@@ -169,13 +177,13 @@ async function savePricingFor(o) {
   const r = calculatePricing({ costUsd:Number(o.costUsd), qty:Number(o.qty)||1,
     fxBase:Number(o.fxBase!=null?o.fxBase:fx.rate), fxSpreadPct:c.fx_spread_pct,
     importTaxPct:c.import_tax_pct, invoiceTaxPct:c.invoice_tax_pct,
-    targetMarginPct:c.target_margin_pct, minMarginPct:c.min_margin_pct });
+    targetMarginPct:c.target_margin_pct, okMarginPct:c.ok_margin_pct, minMarginPct:c.min_margin_pct });
   const row = S.insert('pricings', { lead_id:o.leadId, quote_id:o.quoteId||null, cost_usd:r.costUsd, fx_rate:r.fxRate,
     fx_base:r.fxBase, import_tax_pct:r.importTaxPct, invoice_tax_pct:r.invoiceTaxPct, target_margin_pct:r.targetMarginPct,
-    min_margin_pct:r.minMarginPct, cost_brl:r.costBrl, cost_with_import:r.costWithImport,
-    suggested_price:r.suggestedPrice, min_price:r.minPrice });
+    ok_margin_pct:r.okMarginPct, min_margin_pct:r.minMarginPct, cost_brl:r.costBrl, cost_with_import:r.costWithImport,
+    suggested_price:r.suggestedPrice, acceptable_price:r.acceptablePrice, min_price:r.minPrice });
   log(o.leadId, o.userId, 'pricing', o.mensagem
-    || `Precificação gerada — Sugerido R$ ${fmt(r.suggestedPrice)} / Mínimo R$ ${fmt(r.minPrice)}.`);
+    || `Precificação gerada — Sugerido R$ ${fmt(r.suggestedPrice)} / Aceitável R$ ${fmt(r.acceptablePrice)} / Piso R$ ${fmt(r.minPrice)}.`);
   return { row, calc:r };
 }
 
@@ -249,7 +257,7 @@ async function emitirEEnviarProposta(o) {
   if (r.notOpen || r.belowFloor) return r;
 
   const envio = await sendProposalEmail({ propId: r.row.id, to: o.to, userId: o.userId,
-    req: o.req, exigirEtapa: etapaAntes });
+    req: o.req, exigirEtapa: etapaAntes, intro: o.intro, subject: o.subject });
 
   // Sem e-mail configurado o CRM não é o canal: a proposta segue, avisando que o envio é manual.
   const semCanal = envio.configured === false;
@@ -285,10 +293,17 @@ async function sendProposalEmail(o) {
   const link = baseUrl(o.req) + '/p/' + prop.token;
   const to = o.to || (lead && lead.contact_email);
   if (!to) return { noRecipient:true };
-  const subject = 'Sua proposta — NexxusCRM';
-  const html = `<div style="font-family:Inter,Arial,sans-serif;color:#1D1D1F">`
-    + `<h2 style="color:#0071E3">Proposta comercial — NexxusCRM</h2>`
-    + `<p>Olá, ${lead?lead.contact_name||'':''}. Preparamos sua proposta para <b>${lead?lead.requested_software||lead.product_name||'a solução solicitada':''}</b>.</p>`
+  // o.intro/o.subject: usados quando a proposta nasce de uma NEGOCIAÇÃO (M30) — o texto
+  // que o vendedor escolheu vai no corpo, e a proposta nova viaja no mesmo e-mail. Tudo
+  // passa por aqui de propósito: é o único caminho de envio de proposta, e é ele que
+  // garante a regra do M27 (card só anda quando o e-mail sai).
+  const subject = o.subject || 'Sua proposta — NexxusCRM';
+  const abertura = o.intro
+    ? String(o.intro).split(/\n{2,}/).map(par => `<p>${escapeHtml(par).replace(/\n/g,'<br/>')}</p>`).join('')
+    : `<h2 style="color:#0071E3">Proposta comercial — NexxusCRM</h2>`
+      + `<p>Olá, ${lead?lead.contact_name||'':''}. Preparamos sua proposta para <b>${lead?lead.requested_software||lead.product_name||'a solução solicitada':''}</b>.</p>`;
+  const html = `<div style="font-family:Inter,Arial,sans-serif;color:#1D1D1F;font-size:15px;line-height:1.6">`
+    + abertura
     + `<p><a href="${link}" style="background:#0071E3;color:#fff;padding:12px 20px;border-radius:980px;text-decoration:none;font-weight:600">Ver proposta</a></p>`
     + `<p style="color:#86868B;font-size:13px">Ou copie: ${link}</p>`
     + SIGNATURE_HTML + `</div>`;
@@ -423,6 +438,65 @@ function leadWithJoins(id) {
     owner_name: u ? u.name : null, product_name: p ? p.name : null,
     supplier_name: sup ? sup.name : null,
   });
+}
+
+// ====================================================================
+// Negociação de desconto sem BDR (M30)
+// ====================================================================
+// Ítalo, 02/09: "o BDR é pra parar e pensar; desconto eu não preciso parar pra pensar."
+// Isso DESFAZ o caminho que estava em produção desde 25/08, em que dúvida de desconto
+// (lead #20) subia para a fila do BDR. Agora o agente resolve dentro dos três níveis de
+// preço e devolve TRÊS opções de resposta; neste primeiro momento um humano escolhe qual
+// vai — depois isso vira automático (é só deixar de exigir o clique).
+//
+// Diferença de fundo para o BDR: a pendência de desconto NÃO trava o lead nem o tira do
+// trilho. Ela é um e-mail esperando escolha, com indicador visual — o card continua onde
+// está e o agente continua respondendo o resto.
+function abrirPendenciaDeEmail(leadId, resumo, opcoes) {
+  const lead = S.get('leads', leadId);
+  if (!lead || lead.status !== 'open') return null;
+  const opts = (Array.isArray(opcoes) ? opcoes : []).filter(o => o && o.body).slice(0, 3);
+  if (!opts.length) return null;
+  S.update('leads', leadId, { email_pending_summary: resumo, email_pending_options: opts,
+    email_pending_at: S.now(), updated_at: S.now() });
+  log(leadId, null, 'agent', `Nexus — pedido de desconto tratado sem BDR: ${resumo}. Três respostas prontas aguardam sua escolha.`);
+  notify('email_pendente', `Resposta de desconto aguardando você escolher — ${clientName(leadWithJoins(leadId))}: ${resumo}`, leadId);
+  return opts;
+}
+
+function limparPendenciaDeEmail(leadId) {
+  S.update('leads', leadId, { email_pending_summary:null, email_pending_options:[], email_pending_at:null });
+}
+
+// O humano escolheu uma das três respostas. Preço novo vira proposta V2 (decisão de
+// 02/09: "novo valor gera proposta V2, não e-mail avulso") e o texto escolhido é o corpo
+// do e-mail que a leva. Sem preço novo, é só a resposta.
+async function responderPendenciaDeEmail(o) {
+  const lead = S.get('leads', o.leadId);
+  if (!lead || lead.status !== 'open') return { notOpen:true };
+  const opts = Array.isArray(lead.email_pending_options) ? lead.email_pending_options : [];
+  const escolha = opts[Number(o.indice)];
+  if (!escolha) return { semOpcao:true };
+  const texto = o.texto ? String(o.texto) : escolha.body;   // o vendedor pode editar antes de mandar
+  const assunto = escolha.subject || 'Sobre sua proposta — Nexxus Tech';
+
+  if (escolha.price) {
+    const r = await emitirEEnviarProposta({ leadId:o.leadId, finalPrice:Number(escolha.price),
+      approveBelowFloor:o.approveBelowFloor, userId:o.userId, req:o.req, intro:texto, subject:assunto });
+    if (r.belowFloor || r.notOpen) return r;
+    if (!r.sendFailed) limparPendenciaDeEmail(o.leadId);
+    log(o.leadId, o.userId, 'proposal', `Negociação: enviada a opção "${escolha.nivel}" (R$ ${fmt(escolha.price)}) escolhida pelo vendedor.`);
+    return { proposta:r.row, email:r.email, sendFailed:r.sendFailed || null };
+  }
+
+  const html = `<div style="font-family:Inter,Arial,sans-serif;color:#1D1D1F;font-size:15px;line-height:1.6">`
+    + String(texto).split(/\n{2,}/).map(par => `<p>${escapeHtml(par).replace(/\n/g,'<br/>')}</p>`).join('')
+    + SIGNATURE_HTML + `</div>`;
+  const envio = await sendEmail({ to: lead.contact_email, subject: assunto, html });
+  if (!envio.sent) return { sendFailed: envio.reason || ('status HTTP ' + envio.status) };
+  logEmailOut(o.leadId, o.userId, lead.contact_email, assunto, texto, envio.id);
+  limparPendenciaDeEmail(o.leadId);
+  return { email: envio };
 }
 
 // ====================================================================
@@ -814,7 +888,8 @@ async function handle(req) {
     const f = (k)=> body[k]!=null ? Number(body[k]) : c[k];
     S.data.config = { fx_mode: body.fx_mode||c.fx_mode, fx_manual_rate:f('fx_manual_rate'),
       fx_spread_pct:f('fx_spread_pct'), import_tax_pct:f('import_tax_pct'), invoice_tax_pct:f('invoice_tax_pct'),
-      target_margin_pct:f('target_margin_pct'), min_margin_pct:f('min_margin_pct'), updated_at:S.now() };
+      target_margin_pct:f('target_margin_pct'), ok_margin_pct:f('ok_margin_pct'),
+      min_margin_pct:f('min_margin_pct'), updated_at:S.now() };
     S.save();
     return { status:200, body:{ success:true, data: getConfig() } };
   }
@@ -1186,7 +1261,8 @@ async function handle(req) {
     const fx = c.fx_mode==='manual' ? { rate:c.fx_manual_rate, source:'manual' } : await getUsdBrl();
     const result = calculatePricing({ costUsd:Number(body.cost_usd), qty:Number(body.qty)||1,
       fxBase:Number(body.fx_base!=null?body.fx_base:fx.rate), fxSpreadPct:c.fx_spread_pct,
-      importTaxPct:c.import_tax_pct, invoiceTaxPct:c.invoice_tax_pct, targetMarginPct:c.target_margin_pct, minMarginPct:c.min_margin_pct });
+      importTaxPct:c.import_tax_pct, invoiceTaxPct:c.invoice_tax_pct, targetMarginPct:c.target_margin_pct,
+      okMarginPct:c.ok_margin_pct, minMarginPct:c.min_margin_pct });
     return { status:200, body:{ success:true, data: Object.assign({}, result, { fxSource:fx.source, config:c }) } };
   }
   if (method==='POST' && path==='/api/pricing') {
@@ -1231,6 +1307,26 @@ async function handle(req) {
     if (!prop.token) { prop.token = makeToken(); S.update('proposals', prop.id, { token: prop.token }); }
     return { status:200, body:{ success:true, data:{ link: baseUrl(req) + '/p/' + prop.token, status:prop.status, viewed_at:prop.viewed_at, accepted_at:prop.accepted_at } } };
   }
+  // ---- Negociação de desconto: o vendedor escolhe uma das três respostas (M30) ----
+  if ((m=P(/^\/api\/leads\/(\d+)\/negociacao\/responder$/)) && method==='POST') {
+    const r = await responderPendenciaDeEmail({ leadId:+m[1], indice:body.indice, texto:body.texto,
+      approveBelowFloor:body.approve_below_floor, userId:user.id, req });
+    if (r.notOpen) return { status:409, body:{ success:false, error:{ message:'Este negócio já foi encerrado.' } } };
+    if (r.semOpcao) return { status:404, body:{ success:false, error:{ message:'Essa resposta não está mais pendente.' } } };
+    if (r.belowFloor)
+      return { status:422, body:{ success:false, code:'BELOW_FLOOR',
+        error:{ message:`Preço R$ ${fmt(r.belowFloor.finalPrice)} está ABAIXO do piso (R$ ${fmt(r.belowFloor.floor)}). Requer aprovação gerencial.` } } };
+    if (r.sendFailed)
+      return { status:200, body:{ success:true, data:{ send_failed:r.sendFailed } } };
+    return { status:200, body:{ success:true, data:{ sent:true, proposta: r.proposta||null } } };
+  }
+  // Descartar a pendência sem responder (o vendedor prefere ligar, ou já respondeu fora).
+  if ((m=P(/^\/api\/leads\/(\d+)\/negociacao\/descartar$/)) && method==='POST') {
+    limparPendenciaDeEmail(+m[1]);
+    log(+m[1], user.id, 'note', 'Respostas de negociação descartadas pelo vendedor.');
+    return { status:200, body:{ success:true, data:{ ok:true } } };
+  }
+
   // ---- Chat do site: as conversas que ainda não viraram oportunidade ----
   // Visitante curioso não entra no kanban, mas não pode sumir: fica aqui, com a conversa
   // inteira, e o vendedor promove a oportunidade num clique quando enxergar valor.
@@ -1581,6 +1677,7 @@ function dispararFaq(leadId, pendencia, resposta, userId){
 // Os passos do funil saem para o agentNexus.js executar exatamente o que o humano executa.
 module.exports = { handle, log, notify, leadWithJoins, clientName, OPCOES_RECUSA_PADRAO,
   triageLead, closeLost, createQuote, savePricingFor, createProposal, promoverProposta, sendProposalEmail, emitirEEnviarProposta,
+  abrirPendenciaDeEmail, limparPendenciaDeEmail, responderPendenciaDeEmail,
   logEmailIn, logEmailOut, anotarResumoEmail, SIGNATURE_TEXT, SIGNATURE_HTML,
   timestampRecente, assinaturaValida, extraiEmail, stripHtml,
   respostaAutomatica, autenticacaoFalhou, leadPorReferencia, limiteDeCriacao, _resetLimiteCriacao,

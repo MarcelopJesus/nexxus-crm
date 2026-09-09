@@ -290,8 +290,10 @@ const SDR_SYSTEM = [
   '- "advance": não há nada pendente com o cliente (o pedido está claro). O lead segue para Compras cotar.',
   '- "reply_and_advance": o cliente fez uma dúvida que você CONSEGUE responder com as faixas de preço',
   '  publicadas e com o que a Nexxus faz. Escreva a resposta em reply_subject/reply_body e o lead segue mesmo assim.',
-  '- "escalate": você NÃO sabe responder, ou é pedido fora do padrão (desconto especial, condição',
-  '  de pagamento, contrato específico, produto que não está no catálogo). Aí um humano (BDR) decide.',
+  '- "escalate": você NÃO sabe responder, ou é pedido fora do padrão (condição de pagamento,',
+  '  contrato específico, produto que não está no catálogo, projeto especial). Aí um humano (BDR) decide.',
+  '  ATENÇÃO — pedido de DESCONTO não é caso de escalar: ele tem trilho próprio, com três níveis de preço',
+  '  já definidos. O BDR é para o que exige parar e pensar; desconto não exige.',
   '',
   'FAQ OFICIAL: se a dúvida do cliente estiver coberta por uma das perguntas da FAQ que você recebeu,',
   'a resposta já foi aprovada pelo time — use "reply_and_advance" com ela e NÃO escale por essa razão.',
@@ -492,7 +494,7 @@ async function runVendedor(lead) {
 const INTENT_SCHEMA = {
   type: 'object',
   properties: {
-    intent: { type: 'string', enum: ['continuar', 'parar', 'duvida', 'outro'] },
+    intent: { type: 'string', enum: ['continuar', 'parar', 'duvida', 'desconto', 'outro'] },
     confidence: { type: 'integer' },
     resumo: { type: 'string' },
   },
@@ -505,6 +507,8 @@ const INTENT_SYSTEM = [
   '',
   'Responda com UMA intenção:',
   '- "parar": quer cancelar, desistir, pedir para não receber mais contato, reclamar do contato ou adiar sem previsão.',
+  '- "desconto": está negociando PREÇO — pede desconto, diz que está caro, pede condição melhor, compara com',
+  '  concorrente por causa de valor, ou pede um novo valor/nova proposta. Vale mesmo que ele também pergunte outra coisa.',
   '- "duvida": fez uma pergunta que precisa de resposta antes de seguir.',
   '- "continuar": confirma, aprova, manda seguir, dá dados que faltavam ou só agradece.',
   '- "outro": não dá para dizer.',
@@ -521,6 +525,113 @@ async function classificarEmail(lead, texto) {
   // Confiança baixa não pode virar "continuar" — cai em "outro", que vai para humano.
   if (out.intent === 'continuar' && Number(out.confidence) < CONFIANCA_MINIMA) out.intent = 'outro';
   return out;
+}
+
+// ====================================================================
+// Negociação de desconto — o trilho que substitui a escalação (M30)
+// ====================================================================
+// Decisão de 02/09: desconto NÃO sobe para o BDR. O agente lê o pedido e devolve três
+// respostas prontas, uma por nível de preço (sugerido, aceitável, piso). Neste primeiro
+// momento um humano escolhe qual mandar; depois isso vira automático — o ponto de virada
+// é o AGENT_DESCONTO_AUTO abaixo, e nada mais.
+//
+// O modelo escreve o TEXTO; quem escolhe os NÚMEROS é o código, a partir da precificação
+// gravada. Modelo nenhum inventa preço aqui — é a mesma regra que já vale no resto.
+const DESCONTO_SCHEMA = {
+  type: 'object',
+  properties: {
+    resumo: { type: 'string' },
+    respostas: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: { nivel: { type: 'string', enum: ['sugerido','aceitavel','piso'] },
+          subject: { type: 'string' }, body: { type: 'string' } },
+        required: ['nivel','subject','body'],
+        additionalProperties: false,
+      },
+    },
+  },
+  required: ['resumo','respostas'],
+  additionalProperties: false,
+};
+
+const DESCONTO_SYSTEM = [
+  'Você é a Patrícia, Assistente Comercial da Nexxus Tech. O cliente está negociando PREÇO.',
+  AVISO_INJECAO,
+  '',
+  'Escreva TRÊS respostas de e-mail, uma para cada nível de preço que a empresa autoriza:',
+  '- "sugerido": mantém o preço proposto, defendendo o valor (licença oficial, nota fiscal nacional,',
+  '  suporte em português, garantia de atualização). Nada de desconto.',
+  '- "aceitavel": concede o meio-termo, pedindo algo em troca (fechamento no mês, contrato mais longo,',
+  '  mais licenças, pagamento à vista).',
+  '- "piso": o limite da empresa. Deixe claro, com cordialidade, que é a melhor condição possível.',
+  '',
+  'REGRA ABSOLUTA SOBRE NÚMEROS: NÃO escreva nenhum valor, percentual de desconto ou cálculo no texto.',
+  'O sistema insere o preço de cada nível automaticamente. Escreva como se o valor viesse logo abaixo',
+  'do seu texto — por exemplo "consigo fechar nesta condição:" — e nunca cite reais, dólares ou "%".',
+  '',
+  'resumo: UMA frase dizendo o que o cliente pediu (vira o texto que o vendedor lê antes de escolher).',
+  'Tom: português brasileiro, cordial, direto, sem clichê e sem enrolação. Não assine — a assinatura é automática.',
+].join('\n');
+
+const NIVEL_LABEL = { sugerido:'Preço sugerido', aceitavel:'Preço aceitável', piso:'Piso' };
+
+// Liga o modo automático no dia em que o Marcelo quiser: com AGENT_DESCONTO_AUTO=on a
+// primeira opção (a que preserva a margem) sai sozinha, sem esperar clique.
+function descontoAutomatico() { return String(process.env.AGENT_DESCONTO_AUTO || 'off').toLowerCase() === 'on'; }
+
+// Preços dos três níveis, do que preserva margem ao limite. Sem precificação gravada não
+// há níveis — e sem níveis não há o que negociar sozinho: aí sim é caso de humano.
+function niveisDePreco(leadId) {
+  const pr = S.find('pricings', p => p.lead_id === leadId).sort(byCreatedDesc)[0];
+  if (!pr) return null;
+  const meio = pr.acceptable_price
+    || (pr.suggested_price && pr.min_price ? Math.round(((pr.suggested_price + pr.min_price) / 2) * 100) / 100 : null);
+  if (!pr.suggested_price || !pr.min_price) return null;
+  return { sugerido: pr.suggested_price, aceitavel: meio, piso: pr.min_price };
+}
+
+async function negociarDesconto(lead, cls) {
+  const niveis = niveisDePreco(lead.id);
+  if (!niveis)
+    return escalate(lead, 'sdr', 'Cliente pediu desconto, mas este negócio ainda não tem precificação gravada — sem os três níveis não há o que negociar.', []);
+
+  const out = await llm.chatJSON({
+    system: DESCONTO_SYSTEM,
+    user: contextoLead(lead) + '\n\nO cliente escreveu (intenção: negociação de preço — ' + cls.resumo + ').'
+      + '\n\nEscreva as três respostas.',
+    schemaName: 'respostas_desconto', schema: DESCONTO_SCHEMA, maxTokens: 2500,
+  });
+  const mudou = mudouDebaixo(lead, lead.stage);
+  if (mudou) return abortar(lead, 'sdr', mudou);
+
+  // O código costura texto e número: cada nível recebe o preço que o CRM calculou.
+  const opcoes = ['sugerido','aceitavel','piso'].map(nivel => {
+    const escrita = (out.respostas || []).find(r => r.nivel === nivel);
+    if (!escrita || niveis[nivel] == null) return null;
+    return { nivel: NIVEL_LABEL[nivel], price: niveis[nivel],
+      subject: escrita.subject || ('Sobre sua proposta — ' + nomeProduto(lead)), body: escrita.body };
+  }).filter(Boolean);
+
+  if (!opcoes.length)
+    return escalate(lead, 'sdr', 'Cliente pediu desconto e não consegui montar as respostas — decide um humano.', []);
+
+  const resumo = out.resumo || cls.resumo || 'Cliente pediu desconto.';
+  api.abrirPendenciaDeEmail(lead.id, resumo, opcoes);
+  logMask(lead.id, 'vendedor', 'pedido de desconto tratado dentro dos três níveis de preço (sem BDR): ' + resumo);
+
+  // "Neste primeiro momento eu escolho qual mandar, depois vira automático": ligar o
+  // automático é trocar uma variável de ambiente, não reescrever o fluxo. A opção 0 é
+  // sempre a que preserva a margem — o automático nunca começa cedendo.
+  if (descontoAutomatico()) {
+    const r = await api.responderPendenciaDeEmail({ leadId: lead.id, indice: 0, userId: null });
+    if (r && !r.sendFailed) {
+      logMask(lead.id, 'vendedor', 'resposta de desconto enviada automaticamente (AGENT_DESCONTO_AUTO=on).');
+      return { action: 'desconto_respondido', mask: 'vendedor' };
+    }
+  }
+  return { action: 'email_pendente', mask: 'vendedor', opcoes: opcoes.length };
 }
 
 // Último e-mail recebido do cliente neste lead.
@@ -545,6 +656,9 @@ async function triarSemMascara(leadId) {
     api.anotarResumoEmail(leadId, cls.resumo, cls.intent);
     S.update('leads', leadId, { email_pending: 0 });
     if (mudouDebaixo(lead, lead.stage)) return false;
+    // Proposta enviada e negociação são justamente onde o pedido de desconto chega. Antes
+    // isso ficava parado esperando gente; agora o agente devolve as três respostas.
+    if (cls.intent === 'desconto') { await negociarDesconto(lead, cls); return true; }
     if (cls.intent !== 'parar') return false;   // o resto continua com o vendedor humano
 
     S.update('leads', leadId, { agent_paused: 1 });
@@ -586,6 +700,9 @@ async function triarEmailNovo(lead) {
     api.notify('bdr_action', `Cliente pediu para PARAR — ${api.clientName(lead)}. Agente pausado.`, lead.id);
     return { seguir: false };
   }
+  // Desconto tem trilho próprio desde 02/09 — em qualquer etapa, e sem passar pelo BDR.
+  if (cls.intent === 'desconto') return { seguir: false, resultado: await negociarDesconto(lead, cls) };
+
   // Na triagem (máscara SDR) a dúvida não precisa de tratamento especial: a própria SDR
   // lê o e-mail, responde e avança. Desviar aqui deixaria o lead parado depois da resposta.
   if (MASK_BY_STAGE[lead.stage] === 'sdr') return { seguir: true };
