@@ -231,6 +231,51 @@ function promoverProposta(propId, userId, mensagem) {
   return prop;
 }
 
+// Emitir a proposta E enviá-la — o caminho do botão "Enviar proposta & agendar follow-up".
+// Existe porque até 09/09/2026 esse botão só criava a proposta: marcava o card como
+// "Proposta Enviada" e agendava follow-ups SEM nunca chamar o envio de e-mail (defeito M27,
+// visto ao vivo na reunião de 02/09 — a V2 das 13h15 nunca saiu). Agora o botão humano
+// percorre exatamente o mesmo trilho do agente: rascunho -> envia -> só então promove.
+//
+// A regra que este fluxo protege: o funil NUNCA mostra "proposta enviada" para um cliente
+// que não recebeu nada. Envio que falha deixa a proposta em rascunho, o card parado e um
+// alerta no sino. A única exceção é a instalação SEM e-mail configurado (dev, ou CRM em que
+// o canal é outro): ali não houve falha de entrega, e a proposta anda com o aviso de que o
+// link precisa ser enviado à mão.
+async function emitirEEnviarProposta(o) {
+  const antes = S.get('leads', o.leadId);
+  const etapaAntes = antes ? antes.stage : null;
+  const r = createProposal(Object.assign({}, o, { draft: true }));
+  if (r.notOpen || r.belowFloor) return r;
+
+  const envio = await sendProposalEmail({ propId: r.row.id, to: o.to, userId: o.userId,
+    req: o.req, exigirEtapa: etapaAntes });
+
+  // Sem e-mail configurado o CRM não é o canal: a proposta segue, avisando que o envio é manual.
+  const semCanal = envio.configured === false;
+  const saiu = !!(envio.email && envio.email.sent);
+  if (saiu || semCanal) {
+    const prop = promoverProposta(r.row.id, o.userId, semCanal
+      ? `Proposta v${r.row.version} emitida — R$ ${fmt(r.row.final_price)}. ⚠️ E-mail não configurado: envie o link ao cliente manualmente. Follow-ups agendados (D+1/2/7/15).`
+      : undefined);
+    // promoverProposta devolve null quando o lead mudou no meio do await (encerrado,
+    // pausado, outra versão). Nesse caso o e-mail já saiu e não dá para desfazer — mas
+    // ninguém escreve por cima de um estado novo.
+    return { row: r.row, email: envio.email, link: envio.link, configured: envio.configured,
+      promovida: !!prop, aborted: prop ? null : (envio.aborted || 'lead mudou durante o envio') };
+  }
+
+  const motivo = (envio.noRecipient && 'contato sem e-mail cadastrado')
+    || envio.aborted
+    || (envio.email && (envio.email.reason || ('status HTTP ' + envio.email.status)))
+    || 'falha desconhecida no envio';
+  log(o.leadId, o.userId, 'proposal', `⚠️ Proposta v${r.row.version} NÃO foi enviada (${motivo}). `
+    + 'Ela continua como rascunho e o card não avançou — reenvie pelo botão "Enviar e-mail" do histórico de propostas.');
+  notify('proposal_send_failed', `Proposta v${r.row.version} não saiu por e-mail (${motivo}). O card não avançou.`, o.leadId);
+  return { row: r.row, email: envio.email, link: envio.link, configured: envio.configured,
+    sendFailed: motivo };
+}
+
 // Envio da proposta por e-mail. Também grava email_out — a aba E-mail do lead mostra
 // a conversa inteira, e proposta enviada faz parte dela.
 async function sendProposalEmail(o) {
@@ -1029,16 +1074,22 @@ async function handle(req) {
   }
 
   // ---- Propostas ----
+  // Emite E envia. Não existe mais criar proposta sem tentar entregá-la: era exatamente
+  // essa separação que fazia o botão dizer "enviada" sem nenhum e-mail ter saído (M27).
   if (method==='POST' && path==='/api/proposals') {
-    const r = createProposal({ leadId:body.lead_id, finalPrice:body.final_price,
+    const r = await emitirEEnviarProposta({ leadId:body.lead_id, finalPrice:body.final_price,
       approveBelowFloor:body.approve_below_floor, minPrice:body.min_price,
-      suggestedPrice:body.suggested_price, userId:user.id });
+      suggestedPrice:body.suggested_price, to:body.to, userId:user.id, req });
     if (r.notOpen) return { status:409, body:{ success:false, error:{ message:'Este negócio já foi encerrado — não é possível emitir proposta.' } } };
     if (r.belowFloor)
       return { status:422, body:{ success:false, code:'BELOW_FLOOR',
         error:{ message:`Preço R$ ${fmt(r.belowFloor.finalPrice)} está ABAIXO do piso (R$ ${fmt(r.belowFloor.floor)}). Requer aprovação gerencial.` },
         data:{ floor:r.belowFloor.floor, suggested:r.belowFloor.suggested } } };
-    return { status:201, body:{ success:true, data: r.row } };
+    // 201 mesmo quando o e-mail não sai: a proposta existe (rascunho). Quem conta a
+    // verdade ao vendedor é send_failed — o front não pode dizer "enviada" sem ele vazio.
+    return { status:201, body:{ success:true, data: Object.assign({}, S.get('proposals', r.row.id), {
+      send_failed: r.sendFailed || null, email_sent: !!(r.email && r.email.sent),
+      email_configured: r.configured !== false, link: r.link || null }) } };
   }
 
   // Enviar proposta por e-mail (usa serviço configurado; senão devolve o link)
@@ -1046,7 +1097,10 @@ async function handle(req) {
     const r = await sendProposalEmail({ propId:+m[1], to:body.to, userId:user.id, req });
     if (r.notfound) return notfound();
     if (r.noRecipient) return { status:400, body:{ success:false, error:{ message:'Sem e-mail do contato. Informe um destinatário.' } } };
-    return { status:200, body:{ success:true, data:{ link:r.link, email:r.email, configured:r.configured } } };
+    // Este é também o botão de REENVIO de um rascunho que falhou (M27): agora que o
+    // e-mail saiu, o card finalmente pode avançar e os follow-ups entram na agenda.
+    const promovida = r.email && r.email.sent ? !!promoverProposta(+m[1], user.id) : false;
+    return { status:200, body:{ success:true, data:{ link:r.link, email:r.email, configured:r.configured, promovida } } };
   }
   // Link público da proposta (para copiar/enviar manualmente)
   if ((m=P(/^\/api\/proposals\/(\d+)\/link$/)) && method==='GET') {
@@ -1380,7 +1434,7 @@ function dispararFaq(leadId, pendencia, resposta, userId){
 // log/notify saem daqui para o followups.js escrever timeline e sino no mesmo formato.
 // Os passos do funil saem para o agentNexus.js executar exatamente o que o humano executa.
 module.exports = { handle, log, notify, leadWithJoins, clientName, OPCOES_RECUSA_PADRAO,
-  triageLead, closeLost, createQuote, savePricingFor, createProposal, promoverProposta, sendProposalEmail,
+  triageLead, closeLost, createQuote, savePricingFor, createProposal, promoverProposta, sendProposalEmail, emitirEEnviarProposta,
   logEmailIn, logEmailOut, SIGNATURE_TEXT, SIGNATURE_HTML,
   timestampRecente, assinaturaValida, extraiEmail, stripHtml,
   respostaAutomatica, autenticacaoFalhou, leadPorReferencia, limiteDeCriacao, _resetLimiteCriacao,

@@ -44,7 +44,8 @@ const app = createApp({
       newLead: { title:'', account_id:'', contact_id:'', product_id:'', requested_software:'', qty:1, source:'site', notes:'' },
       quoteForm: { supplier_id:'', product_id:'', cost_amount:'', cost_currency:'USD', qty:1, supplier_ref:'', notes:'' },
       quoteHint: '',
-      priceCalc: null, propInput: { final_price:'', approve_below_floor:false }, closeForm:{ result:'', lost_reason:'' },
+      priceCalc: null, sendingProposal: false,
+      propInput: { final_price:'', approve_below_floor:false }, closeForm:{ result:'', lost_reason:'' },
       noteInput: '', savingPrice:false,
       newSupplier:{ name:'', country:'', currency:'USD' }, newProduct:{ supplier_id:'', name:'', sku:'', list_cost_usd:'' },
       newUser:{ name:'', email:'', password:'senha123', area:'vendas', role:'user' },
@@ -207,8 +208,10 @@ const app = createApp({
     async function sendPropEmail(p){
       const r = await API.post('/api/proposals/' + p.id + '/send-email', {});
       if (!r.ok) { flash((r.data && r.data.error && r.data.error.message) || 'Erro ao enviar.'); return; }
-      if (r.data.data.email && r.data.data.email.sent) flash('E-mail enviado ao cliente.');
-      else flash('Serviço de e-mail não configurado — use "Copiar link" e envie por WhatsApp/e-mail.');
+      const d = r.data.data;
+      if (d.email && d.email.sent) flash(d.promovida ? 'E-mail enviado. Agora sim o card avançou e os follow-ups foram agendados.' : 'E-mail enviado ao cliente.');
+      else if (d.configured === false) flash('Serviço de e-mail não configurado — use "Copiar link" e envie por WhatsApp/e-mail.');
+      else flash('⚠️ O e-mail NÃO saiu. A proposta continua como rascunho — tente de novo em instantes.');
       await refreshDrawer();
     }
     function isOverdue(t){ return !t.done && t.due_date && t.due_date < todayBR(); }
@@ -340,10 +343,25 @@ const app = createApp({
       S.savingPrice = false;
       if (r.ok) { flash('Precificação salva. Preços disponíveis para o vendedor.'); await refreshDrawer(); }
     }
+    // O botão emite E envia numa chamada só. O aviso na tela agora reflete o que
+    // realmente aconteceu com o e-mail — dizer "enviada" sem envio foi o defeito M27.
     async function sendProposal(){
+      S.sendingProposal = true;
       const r = await API.post('/api/proposals', { lead_id:S.drawer.lead.id, final_price:Number(S.propInput.final_price), approve_below_floor:S.propInput.approve_below_floor });
+      S.sendingProposal = false;
       if (r.status === 422) { S.propInput.belowFloorMsg = r.data.error.message; flash('Abaixo do piso — marque a aprovação para prosseguir.'); return; }
-      if (r.ok) { flash('Proposta enviada. Follow-ups agendados.'); S.propInput = { final_price:'', approve_below_floor:false }; await refreshDrawer(); S.drawerTab = 'timeline'; }
+      if (!r.ok) { flash((r.data && r.data.error && r.data.error.message) || 'Erro ao emitir a proposta.'); return; }
+      const d = r.data.data;
+      S.propInput = { final_price:'', approve_below_floor:false };
+      if (d.send_failed) {
+        flash('⚠️ Proposta criada como RASCUNHO — o e-mail não saiu (' + d.send_failed + '). O card não avançou; reenvie pelo histórico de propostas.');
+      } else if (!d.email_configured) {
+        flash('Proposta emitida, mas o serviço de e-mail não está configurado — copie o link e envie ao cliente.');
+      } else {
+        flash('Proposta enviada por e-mail ao cliente. Follow-ups agendados.');
+      }
+      await refreshDrawer();
+      S.drawerTab = d.send_failed ? 'proposta' : 'timeline';
     }
     async function closeLead(){
       if (!S.closeForm.result) { flash('Escolha ganho ou perdido.'); return; }

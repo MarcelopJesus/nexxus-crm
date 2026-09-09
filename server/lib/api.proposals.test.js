@@ -38,14 +38,14 @@ async function novaProposta(titulo, price) {
   const leadId = lead.body.data.id;
   const quote = await api('POST', '/api/quotes', { lead_id: leadId, cost_amount: 1000, cost_currency: 'USD', qty: 1 });
   await api('POST', '/api/pricing', { lead_id: leadId, quote_id: quote.body.data.id, cost_usd: 1000, qty: 1 });
-  const prop = await api('POST', '/api/proposals', { lead_id: leadId, final_price: price });
+  const prop = await api('POST', '/api/proposals', { lead_id: leadId, final_price: price, to: 'cliente@example.com' });
   assert.equal(prop.status, 201, 'proposta deveria ter sido criada: ' + JSON.stringify(prop.body));
   return { leadId, propToken: prop.body.data.token, propId: prop.body.data.id };
 }
 
 // Nova versão da proposta para o mesmo lead (invalida o link anterior).
 async function novaVersao(leadId, price) {
-  const prop = await api('POST', '/api/proposals', { lead_id: leadId, final_price: price });
+  const prop = await api('POST', '/api/proposals', { lead_id: leadId, final_price: price, to: 'cliente@example.com' });
   assert.equal(prop.status, 201, 'nova versão deveria ter sido criada: ' + JSON.stringify(prop.body));
   return { propToken: prop.body.data.token, version: prop.body.data.version };
 }

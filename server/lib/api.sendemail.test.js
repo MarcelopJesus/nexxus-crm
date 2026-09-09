@@ -31,7 +31,7 @@ const call = (method, path, body, opts = {}) =>
 async function propostaEnviada(titulo, price) {
   const lead = await call('POST', '/api/leads', { title: titulo });
   const leadId = lead.body.data.id;
-  const prop = await call('POST', '/api/proposals', { lead_id: leadId, final_price: price });
+  const prop = await call('POST', '/api/proposals', { lead_id: leadId, final_price: price, to: 'cliente@example.com' });
   assert.equal(prop.status, 201);
   return prop.body.data;
 }

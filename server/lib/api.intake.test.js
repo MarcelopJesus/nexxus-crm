@@ -35,7 +35,7 @@ const diasAtras = (d) => new Date(Date.now() - d * 86400000).toISOString().slice
 async function propostaEnviada(titulo, dias) {
   const lead = await call('POST', '/api/leads', { title: titulo });
   const leadId = lead.body.data.id;
-  const prop = await call('POST', '/api/proposals', { lead_id: leadId, final_price: 10000 });
+  const prop = await call('POST', '/api/proposals', { lead_id: leadId, final_price: 10000, to: 'cliente@example.com' });
   assert.equal(prop.status, 201);
   envelhecer(leadId, dias);
   return { leadId, prop: prop.body.data };
@@ -195,7 +195,7 @@ test('aceite antigo não blinda para sempre: versão nova sem resposta perde', a
   store.update('proposals', lead.prop.id, { status: 'accepted', accepted_at: diasAtras(200) });
   // Negócio reaberto e proposta v2 enviada — que ficou 90 dias sem resposta nenhuma.
   store.update('leads', lead.leadId, { status: 'open', stage: 'negociacao' });
-  const v2 = await call('POST', '/api/proposals', { lead_id: lead.leadId, final_price: 9000 });
+  const v2 = await call('POST', '/api/proposals', { lead_id: lead.leadId, final_price: 9000, to: 'cliente@example.com' });
   assert.equal(v2.body.data.version, 2);
   envelhecer(lead.leadId, 90);
 

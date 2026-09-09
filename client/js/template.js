@@ -677,7 +677,8 @@ function DRAWER_TEMPLATE() { return `
           <div class="field"><label>Preço final ao cliente (R$)</label><input v-model.number="S.propInput.final_price" type="number" step="0.01" placeholder="0,00"/></div>
           <div v-if="S.propInput.belowFloorMsg" class="error-box">{{ S.propInput.belowFloorMsg }}</div>
           <label class="small flex center gap" style="margin-bottom:12px"><input type="checkbox" v-model="S.propInput.approve_below_floor"/> Aprovar venda abaixo do piso (requer alçada gerencial)</label>
-          <button class="btn" @click="sendProposal">Enviar proposta &amp; agendar follow-up</button>
+          <button class="btn" @click="sendProposal" :disabled="S.sendingProposal">{{ S.sendingProposal ? 'Enviando ao cliente…' : 'Enviar proposta ao cliente &amp; agendar follow-up' }}</button>
+          <p class="small muted" style="margin-top:8px">O e-mail sai nesta mesma ação. Se ele não sair, a proposta fica como rascunho e o card NÃO avança.</p>
         </div>
         <div class="card card-p" v-if="S.drawer.proposals.length">
           <div class="section-title">Histórico de propostas</div>
