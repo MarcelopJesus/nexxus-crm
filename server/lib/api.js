@@ -323,8 +323,22 @@ function logEmailOut(leadId, userId, to, subject, body, messageId) {
     email_body:body||'', message_id: messageId||null });
 }
 function logEmailIn(leadId, from, subject, body) {
-  S.insert('activities', { lead_id:leadId, user_id:null, type:'email_in',
-    message:`De ${from} — ${subject}\n${body||''}`.trim(), email_from:from, email_subject:subject, email_body:body||'' });
+  return S.insert('activities', { lead_id:leadId, user_id:null, type:'email_in',
+    message:`De ${from} — ${subject}\n${body||''}`.trim(), email_from:from, email_subject:subject, email_body:body||'',
+    ai_summary:null, ai_intent:null });
+}
+
+// M28 — "e-mail in" com resumo da IA. O evento na timeline precisa dizer O QUE o cliente
+// pediu ("cliente solicitou V2"), não despejar o e-mail inteiro: é assim que a régua de
+// tempo entre o que saiu e o que voltou fica legível. O resumo vem da classificação que o
+// agente JÁ faz a cada e-mail recebido — nenhuma chamada extra de IA — e é anexado ao
+// próprio evento email_in, para não existirem dois registros do mesmo acontecimento.
+function anotarResumoEmail(leadId, resumo, intent) {
+  if (!resumo) return null;
+  const ent = S.find('activities', a => a.lead_id === leadId && a.type === 'email_in').sort(byCreatedDesc)[0];
+  if (!ent || ent.ai_summary) return ent || null;   // idempotente: não reescreve resumo já gravado
+  S.update('activities', ent.id, { ai_summary: String(resumo).slice(0, 300), ai_intent: intent || null });
+  return S.get('activities', ent.id);
 }
 
 // Registra a abertura da proposta pelo cliente. Toda abertura conta; só a primeira
@@ -1435,7 +1449,7 @@ function dispararFaq(leadId, pendencia, resposta, userId){
 // Os passos do funil saem para o agentNexus.js executar exatamente o que o humano executa.
 module.exports = { handle, log, notify, leadWithJoins, clientName, OPCOES_RECUSA_PADRAO,
   triageLead, closeLost, createQuote, savePricingFor, createProposal, promoverProposta, sendProposalEmail, emitirEEnviarProposta,
-  logEmailIn, logEmailOut, SIGNATURE_TEXT, SIGNATURE_HTML,
+  logEmailIn, logEmailOut, anotarResumoEmail, SIGNATURE_TEXT, SIGNATURE_HTML,
   timestampRecente, assinaturaValida, extraiEmail, stripHtml,
   respostaAutomatica, autenticacaoFalhou, leadPorReferencia, limiteDeCriacao, _resetLimiteCriacao,
   reservarEvento, fecharEvento, liberarEvento };

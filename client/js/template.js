@@ -752,11 +752,16 @@ function DRAWER_TEMPLATE() { return `
       <div v-if="S.drawerTab==='timeline'">
         <div class="card card-p"><div class="section-title">Histórico</div>
           <div class="timeline">
-            <div v-for="a in S.drawer.activities" :key="a.id" class="tl-item">
-              <div class="flex between"><span class="tl-type">{{ a.type }}</span><span class="tl-time">{{ fmtDT(a.created_at) }}</span></div>
-              <div class="small">{{ a.message }} <span class="muted" v-if="a.user_name">· {{ a.user_name }}</span></div>
+            <div v-for="a in timelineItems" :key="a.id" class="tl-item">
+              <div class="flex between"><span class="tl-type">{{ a._label }}</span><span class="tl-time">{{ fmtDT(a.created_at) }}</span></div>
+              <div class="small">{{ a._text }} <span class="muted" v-if="a.user_name">· {{ a.user_name }}</span></div>
+              <div v-if="a._regua" class="small" style="color:var(--nx-primary);font-weight:600;margin-top:3px">⏱ {{ a._regua }}</div>
+              <details v-if="a._detalhe" style="margin-top:4px">
+                <summary class="small muted" style="cursor:pointer">ver o e-mail na íntegra</summary>
+                <div class="small" style="white-space:pre-wrap;margin-top:6px;padding:8px;border-radius:8px;background:var(--nx-bg, #f5f5f7)">{{ a.email_body || a.message }}</div>
+              </details>
             </div>
-            <p v-if="!S.drawer.activities.length" class="muted small">Sem eventos.</p>
+            <p v-if="!timelineItems.length" class="muted small">Sem eventos.</p>
           </div>
         </div>
       </div>

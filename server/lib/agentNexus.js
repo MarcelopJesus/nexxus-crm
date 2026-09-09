@@ -542,6 +542,7 @@ async function triarSemMascara(leadId) {
     if (!ent) { S.update('leads', leadId, { email_pending: 0 }); return false; }
     const cls = await classificarEmail(lead,
       'Assunto: ' + (ent.email_subject || '(sem assunto)') + '\n\n' + (ent.email_body || ent.message || ''));
+    api.anotarResumoEmail(leadId, cls.resumo, cls.intent);
     S.update('leads', leadId, { email_pending: 0 });
     if (mudouDebaixo(lead, lead.stage)) return false;
     if (cls.intent !== 'parar') return false;   // o resto continua com o vendedor humano
@@ -570,6 +571,7 @@ async function triarEmailNovo(lead) {
   // O assunto também é texto do cliente: entra cercado junto com o corpo.
   const cls = await classificarEmail(lead,
     'Assunto: ' + (ent.email_subject || '(sem assunto)') + '\n\n' + (ent.email_body || ent.message || ''));
+  api.anotarResumoEmail(lead.id, cls.resumo, cls.intent);
   const mudou = mudouDebaixo(lead, lead.stage);
   if (mudou) { abortar(lead, MASK_BY_STAGE[lead.stage], mudou); return { seguir: false }; }
 

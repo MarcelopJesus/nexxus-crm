@@ -157,6 +157,49 @@ const app = createApp({
       await loadFaq();
       flash(f.active ? 'Pergunta desativada — o agente para de usá-la.' : 'Pergunta reativada.');
     }
+    // ---------- Timeline legível (M28) ----------
+    // "A timeline é auditoria" (Ítalo, 02/09). Para ser auditoria ela tem de ser lida de
+    // relance: rótulo humano no lugar da chave do banco, o resumo da IA no lugar do e-mail
+    // inteiro, e a RÉGUA DE TEMPO — quanto o cliente levou para responder o que mandamos, e
+    // quanto nós levamos para responder o que ele mandou. Era a régua que faltava para o
+    // Ítalo ver que a V2 saiu no dia 2 e o cliente tinha pedido no dia 10.
+    const TL_LABEL = { email_in:'✉️ E-mail recebido', email_out:'✉️ E-mail enviado', proposal:'📄 Proposta',
+      stage_change:'➜ Etapa', close:'🏁 Fechamento', note:'📝 Nota', quote:'🧾 Cotação', pricing:'💰 Precificação',
+      agent:'🤖 Agente', agent_error:'⚠️ Agente', bdr:'🙋 BDR', email_quarentena:'🛡️ Quarentena', chat_in:'💬 Chat do site' };
+    function tlLabel(a){ return TL_LABEL[a.type] || a.type; }
+    // E-mail recebido mostra o resumo da IA; sem resumo (agente desligado), o assunto.
+    function tlText(a){
+      if (a.type === 'email_in') return a.ai_summary || a.email_subject || 'Cliente respondeu por e-mail.';
+      return a.message;
+    }
+    function tlHasDetail(a){ return a.type === 'email_in' && !!(a.email_body || a.message); }
+    function humanizarIntervalo(ms){
+      const min = Math.round(ms / 60000);
+      if (min < 1) return 'na hora';
+      if (min < 60) return min + (min === 1 ? ' minuto' : ' minutos');
+      const h = Math.round(min / 60);
+      if (h < 24) return h + (h === 1 ? ' hora' : ' horas');
+      const d = Math.round(h / 24);
+      return d + (d === 1 ? ' dia' : ' dias');
+    }
+    // Atividades vêm da API do mais novo para o mais velho; a régua olha para trás.
+    const timelineItems = computed(() => {
+      const items = (S.drawer && S.drawer.activities) || [];
+      return items.map((a, i) => {
+        let regua = null;
+        if (a.type === 'email_in' || a.type === 'email_out') {
+          // O par é o e-mail anterior no sentido OPOSTO — nós respondendo ele, ou ele nos respondendo.
+          const oposto = a.type === 'email_in' ? 'email_out' : 'email_in';
+          const anterior = items.slice(i + 1).find(x => x.type === oposto);
+          const t1 = toDate(a.created_at), t0 = anterior && toDate(anterior.created_at);
+          if (t0 && t1 && t1 >= t0) {
+            regua = (a.type === 'email_in' ? 'cliente respondeu ' : 'respondemos ') + humanizarIntervalo(t1 - t0) + ' depois';
+          }
+        }
+        return Object.assign({}, a, { _label: tlLabel(a), _text: tlText(a), _regua: regua, _detalhe: tlHasDetail(a) });
+      });
+    });
+
     // Aba E-mail do drawer: só as atividades da conversa, em ordem cronológica.
     const emailThread = computed(() => {
       if (!S.drawer) return [];
@@ -409,7 +452,7 @@ const app = createApp({
       loadNotifications, markNotifRead, propLink, propStatusLabel, copyText, copyProposal, openProposal, sendPropEmail, isOverdue, isToday, srcColor, barPct,
       channelLabel, originBadge,
       loadProspects, runResearch, importProspect, discardProspect, generateOutreach, runQualify, tierColor, fitColor,
-      loadBdr, useBdrOption, resolveBdr, toggleAgentPause, maskLabel, emailThread,
+      loadBdr, useBdrOption, resolveBdr, toggleAgentPause, maskLabel, emailThread, timelineItems,
       loadFaq, addFaq, editFaq, cancelFaqEdit, saveFaqEdit, toggleFaq };
   },
   template: APP_TEMPLATE(),
