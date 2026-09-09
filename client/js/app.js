@@ -394,9 +394,31 @@ const app = createApp({
     const leadsByStage = computed(() => {
       const map = {}; S.meta.stages.forEach(s => map[s.key] = []);
       S.leads.filter(l => l.status === 'open').forEach(l => { (map[l.stage] = map[l.stage] || []).push(l); });
+      // Fechamento com ganhos e perdas (decidido em 21/08, seção 9 do DECISOES). O estado
+      // JÁ existia no banco — aceite do cliente vira won sozinho e o lost automático por
+      // inatividade também. O que faltava era a coluna: o kanban filtrava status==='open'
+      // e esses negócios simplesmente sumiam da tela. Nenhum campo novo foi criado.
+      map.__won  = S.leads.filter(l => l.status === 'won');
+      map.__lost = S.leads.filter(l => l.status === 'lost');
       return map;
     });
+    // As duas colunas de fechamento vêm depois das etapas e não recebem arrasto: quem
+    // fecha um negócio é o aceite do cliente, a varredura de inatividade ou a aba
+    // Fechamento — nunca um card empurrado sem motivo registrado.
+    const colunasDoFunil = computed(() => (S.meta.stages || []).concat([
+      { key:'__won',  label:'Ganhos',   fechamento:true },
+      { key:'__lost', label:'Perdidos', fechamento:true },
+    ]));
+    // "Close won só é won de verdade quando o trâmite fecha (nota emitida / licença
+    // liberada)" — seção 9. O contrato criado no ganho carrega esse estado.
+    function tramiteDoLead(l){
+      if (l.status !== 'won') return null;
+      return l.contract_status === 'signed' ? { txt:'✓ trâmite concluído', cor:'#34C759' }
+                                            : { txt:'aguardando trâmite', cor:'#FF9500' };
+    }
+    const totalDaColuna = (k) => (leadsByStage.value[k] || []).reduce((a,l) => a + (l.estimated_value || 0), 0);
     function onDragStart(l){ S.dragId = l.id; }
+    function podeSoltar(col){ return !col.fechamento; }
     function onDrop(stageKey){
       const id = S.dragId; S.dragOver = null; S.dragId = null;
       const lead = S.leads.find(l => l.id === id); if (!lead || lead.stage === stageKey) return;
@@ -546,7 +568,7 @@ const app = createApp({
 
     const filteredContacts = computed(() => S.newLead.account_id ? S.contacts.filter(c => c.account_id == S.newLead.account_id) : S.contacts);
 
-    return { S, route, go, stageLabel, AREA_LABEL, BRL, PCT, initials, canArea, flash, fmtDT, fmtD,
+    return { S, route, go, stageLabel, colunasDoFunil, tramiteDoLead, totalDaColuna, podeSoltar, AREA_LABEL, BRL, PCT, initials, canArea, flash, fmtDT, fmtD,
       doLogin, logout, leadsByStage, onDragStart, onDrop, createLead, openLead, closeDrawer,
       triage, toggleHot, addNote, submitQuote, runPricing, savePricing, sendProposal, closeLead,
       toggleTask, toggleTaskRow, updateContract, latestPricing, saveConfig, addSupplier, addProduct, addUser,

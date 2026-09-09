@@ -147,14 +147,20 @@ function APP_TEMPLATE() { return `
       <!-- ===== FUNIL (KANBAN) ===== -->
       <div v-else-if="route==='/funil'">
         <div class="flex between center mb">
-          <div class="muted small">Arraste os cards entre as colunas para mudar o estágio. Clique para abrir o detalhe.</div>
+          <div class="muted small">Os cards andam sozinhos com o trilho do agente. Arraste só se precisar corrigir — <b>Ganhos</b> e <b>Perdidos</b> não recebem arrasto: quem fecha é o aceite do cliente, a inatividade ou a aba Fechamento.</div>
           <button class="btn" @click="S.showNewLead=true">+ Novo Lead</button>
         </div>
         <div class="board">
-          <div v-for="s in S.meta.stages" :key="s.key" class="col" :class="{drop:S.dragOver===s.key}"
-               @dragover.prevent="S.dragOver=s.key" @dragleave="S.dragOver=null" @drop="onDrop(s.key)">
-            <div class="col-head"><span><span class="stage-dot" :style="{background:'var(--st-'+s.key+')'}"></span>{{ s.label }}</span><span class="count">{{ (leadsByStage[s.key]||[]).length }}</span></div>
-            <div v-for="l in (leadsByStage[s.key]||[])" :key="l.id" class="lead-card" draggable="true"
+          <div v-for="s in colunasDoFunil" :key="s.key" class="col" :class="{drop:S.dragOver===s.key, fechamento:s.fechamento}"
+               @dragover.prevent="podeSoltar(s) && (S.dragOver=s.key)" @dragleave="S.dragOver=null" @drop="podeSoltar(s) && onDrop(s.key)">
+            <div class="col-head">
+              <span>
+                <span class="stage-dot" :style="{background: s.key==='__won' ? '#34C759' : (s.key==='__lost' ? '#FF3B30' : 'var(--st-'+s.key+')')}"></span>{{ s.label }}
+              </span>
+              <span class="count">{{ (leadsByStage[s.key]||[]).length }}</span>
+            </div>
+            <div v-if="totalDaColuna(s.key)" class="small muted" style="padding:0 6px 8px">{{ BRL(totalDaColuna(s.key)) }}</div>
+            <div v-for="l in (leadsByStage[s.key]||[])" :key="l.id" class="lead-card" :draggable="!s.fechamento"
                  @dragstart="onDragStart(l)" @click="openLead(l.id)">
               <div class="lc-title">{{ l.title }} <span v-if="l.hot" class="hot-flag">🔥</span>
                 <span v-if="l.email_pending_options && l.email_pending_options.length" title="Resposta de negociação aguardando você escolher">✉️</span></div>
@@ -165,6 +171,9 @@ function APP_TEMPLATE() { return `
                 <span v-if="l.estimated_value" class="chip val">{{ BRL(l.estimated_value) }}</span>
                 <span class="chip">Qtd {{ l.qty }}</span>
               </div>
+              <!-- Ganho ainda não é ganho enquanto o trâmite não fecha (seção 9). -->
+              <div v-if="tramiteDoLead(l)" class="small" :style="{color: tramiteDoLead(l).cor, fontWeight:600, marginTop:'4px'}">{{ tramiteDoLead(l).txt }}</div>
+              <div v-if="l.status==='lost' && l.lost_reason" class="small muted" style="margin-top:4px">{{ l.lost_reason }}</div>
             </div>
             <p v-if="!(leadsByStage[s.key]||[]).length" class="muted small" style="padding:8px 6px">Vazio</p>
           </div>

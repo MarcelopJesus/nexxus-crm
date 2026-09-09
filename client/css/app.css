@@ -118,6 +118,11 @@ table.tbl { width:100%; border-collapse:collapse; }
 .price-box .pb-v{ font-size:26px; font-weight:800; margin-top:4px; }
 .small{ font-size:12px;} .mono{ font-variant-numeric: tabular-nums; }
 .toast{ position:fixed; bottom:22px; left:50%; transform:translateX(-50%); background:var(--nx-sidebar); color:#fff; padding:12px 20px; border-radius:10px; box-shadow:var(--nx-shadow-lg); z-index:80; font-weight:600; font-size:13.5px; }
+/* Colunas de fechamento (ganhos/perdidos): visualmente separadas do bloco operacional
+   — a decisão de 02/09 pediu justamente essa separação entre operação e resultado. */
+.col.fechamento{ background:var(--nx-surface-2, #f5f5f7); border-style:dashed; }
+.col.fechamento .lead-card{ cursor:pointer; opacity:.92; }
+
 /* Pop-ups de evento em tempo real (M29) — canto superior direito, empilhados, some
    sozinho em 12s. Fica ACIMA do drawer de propósito: o cliente pode abrir a proposta
    enquanto o vendedor está com outro lead na tela. */

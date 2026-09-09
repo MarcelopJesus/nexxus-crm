@@ -432,11 +432,16 @@ function leadWithJoins(id) {
   const u   = l.owner_id ? S.get('users', l.owner_id) : null;
   const p   = l.product_id ? S.get('products', l.product_id) : null;
   const sup = p && p.supplier_id ? S.get('suppliers', p.supplier_id) : null;
+  // O contrato diz se o negócio ganho já FECHOU de verdade — "close won só é won quando
+  // o trâmite fecha (nota emitida / licença liberada)", seção 9 do DECISOES. É por ele
+  // que a coluna Ganhos separa o aceite do cliente do negócio concluído.
+  const ctr = S.find('contracts', c => c.lead_id === l.id).sort((a,b)=>b.id-a.id)[0];
   return Object.assign({}, l, {
     account_name: acc ? acc.name : null,
     contact_name: ct ? ct.name : null, contact_email: ct ? ct.email : null,
     owner_name: u ? u.name : null, product_name: p ? p.name : null,
     supplier_name: sup ? sup.name : null,
+    contract_status: ctr ? ctr.status : null,
   });
 }
 
