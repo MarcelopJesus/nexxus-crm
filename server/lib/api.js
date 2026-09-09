@@ -425,6 +425,106 @@ function leadWithJoins(id) {
   });
 }
 
+// ====================================================================
+// Chat do site como canal da oportunidade (M28)
+// ====================================================================
+// Decisão de 02/09: "todo canal vira histórico dentro da oportunidade". O chat do site
+// era o único que ficava de fora — as mensagens morriam no banco do próprio site.
+//
+// Regra de entrada escolhida com o Marcelo em 09/09: conversa de visitante curioso NÃO
+// vira card (o kanban já está sujo demais — M34). Ela fica numa sessão de chat, visível
+// e pesquisável; vira oportunidade só quando aparece INTENÇÃO — e-mail deixado ou pedido
+// de orçamento/preço/demonstração. Aí a conversa inteira migra para dentro do lead.
+const CHAT_INTENCAO = /(or[çc]amento|proposta|cota[çc][ãa]o|pre[çc]o|quanto custa|valor|comprar|contratar|adquirir|licen[çc]a|demonstra[çc][ãa]o|\bdemo\b|implanta[çc][ãa]o|contrato|nota fiscal)/i;
+const EMAIL_NO_TEXTO = /[\w.+-]+@[\w-]+\.[\w.-]{2,}/;
+
+function autoLeadDoChat() { return String(process.env.SITE_CHAT_AUTOLEAD || 'on').toLowerCase() !== 'off'; }
+
+// Só o que o VISITANTE escreveu conta como intenção — a resposta do bot fala de preço o
+// tempo todo e transformaria toda conversa em lead.
+function intencaoNoChat(mensagens) {
+  const doVisitante = mensagens.filter(m => m.role === 'user').map(m => m.content).join('\n');
+  const email = (doVisitante.match(EMAIL_NO_TEXTO) || [])[0] || null;
+  return { email, querComprar: CHAT_INTENCAO.test(doVisitante) };
+}
+
+function logChat(leadId, m) {
+  return S.insert('activities', { lead_id:leadId, user_id:null,
+    type: m.role === 'user' ? 'chat_in' : 'chat_out',
+    message: String(m.content || '').slice(0, 4000), chat_at: m.at || null });
+}
+
+// Cria (ou reencontra) a oportunidade e leva a conversa inteira para dentro dela.
+function promoverChat(sessao, email, nome) {
+  let leadId = sessao.lead_id || null;
+  if (!leadId && email) {
+    const ct = S.findOne('contacts', c => String(c.email||'').toLowerCase() === String(email).toLowerCase());
+    if (ct) {
+      const aberto = S.find('leads', l => l.contact_id === ct.id && l.status === 'open').sort(byUpdatedDesc)[0];
+      if (aberto) leadId = aberto.id;
+    }
+  }
+  let criado = false;
+  if (!leadId) {
+    const empresa = email ? (String(email).split('@')[1] || 'Visitante do site') : 'Visitante do site';
+    let acc = S.findOne('accounts', a => a.name.toLowerCase() === empresa.toLowerCase());
+    if (!acc) acc = S.insert('accounts', { name:empresa, cnpj:null, segment:null, city:null });
+    const ct = email
+      ? (S.findOne('contacts', c => String(c.email||'').toLowerCase() === String(email).toLowerCase())
+         || S.insert('contacts', { account_id:acc.id, name: nome || String(email).split('@')[0], email, phone:null, role_title:null }))
+      : S.insert('contacts', { account_id:acc.id, name: nome || 'Visitante do chat', email:null, phone:null, role_title:null });
+    const owner = pickOwner();
+    const lead = S.insert('leads', { title: empresa + ' — chat do site', account_id:acc.id, contact_id:ct.id,
+      product_id:null, requested_software:null, source:'site-chat', stage:'novo_lead', owner_id:owner, hot:0,
+      status:'open', lost_reason:null, estimated_value:null, qty:1, kind:'b2b',
+      preferred_channel: email ? 'email' : null, notes:'Veio do chat do site.', updated_at:S.now() });
+    leadId = lead.id; criado = true;
+    log(leadId, null, 'note', 'Lead criado a partir do chat do site (o visitante demonstrou intenção).');
+    notify('lead_new', `Novo lead pelo chat do site${email?(' — '+email):''}.`, leadId);
+  }
+  // A conversa que já existia na sessão migra de uma vez, em ordem, para a timeline.
+  for (const m of (sessao.messages || [])) logChat(leadId, m);
+  S.update('chat_sessions', sessao.id, { lead_id:leadId, email: email || sessao.email || null, promoted_at:S.now() });
+  return { leadId, criado };
+}
+
+// Entrada do chat: o site manda a conversa da sessão a cada troca.
+function receberChatDoSite(body) {
+  const sessionId = String(body.sessionId || '').trim();
+  if (!sessionId) return { status:400, body:{ success:false, error:{ message:'sessionId é obrigatório.' } } };
+  const recebidas = Array.isArray(body.messages) ? body.messages
+    .filter(m => m && (m.role === 'user' || m.role === 'assistant') && String(m.content||'').trim())
+    .map(m => ({ role:m.role, content:String(m.content).slice(0, 4000), at:m.at || null })) : [];
+  if (!recebidas.length) return { status:400, body:{ success:false, error:{ message:'Nenhuma mensagem válida.' } } };
+
+  let sessao = S.findOne('chat_sessions', c => c.session_id === sessionId);
+  if (!sessao) sessao = S.insert('chat_sessions', { session_id:sessionId, lead_id:null, email:null,
+    page: body.page || null, messages:[], last_at:S.now(), promoted_at:null });
+
+  // O site reenvia a conversa inteira a cada troca; só o que ainda não foi guardado entra.
+  const novas = recebidas.slice((sessao.messages || []).length);
+  if (!novas.length) return { status:200, body:{ success:true, data:{ lead_id:sessao.lead_id, novas:0 } } };
+  const messages = (sessao.messages || []).concat(novas);
+  S.update('chat_sessions', sessao.id, { messages, last_at:S.now(), page: body.page || sessao.page });
+  sessao = S.get('chat_sessions', sessao.id);
+
+  // Conversa já ligada a uma oportunidade: cada mensagem nova entra direto na timeline dela.
+  if (sessao.lead_id) {
+    const lead = S.get('leads', sessao.lead_id);
+    if (lead) { novas.forEach(m => logChat(sessao.lead_id, m)); touchLead(sessao.lead_id); }
+    return { status:200, body:{ success:true, data:{ lead_id:sessao.lead_id, novas:novas.length } } };
+  }
+
+  const sinal = intencaoNoChat(messages);
+  const email = String(body.email || '').trim() || sinal.email;
+  if (!autoLeadDoChat() || (!email && !sinal.querComprar))
+    return { status:200, body:{ success:true, data:{ lead_id:null, novas:novas.length, intencao:false } } };
+
+  const r = promoverChat(sessao, email, body.name);
+  if (r.criado) dispararAgente(r.leadId);
+  return { status:201, body:{ success:true, data:{ lead_id:r.leadId, novas:novas.length, intencao:true, created:r.criado } } };
+}
+
 // Processamento do e-mail recebido, separado da rota para caber num try/catch: se algo
 // aqui estourar, o evento Svix volta a ficar livre e a retentativa do Resend funciona.
 async function processarEmailRecebido(body, req) {
@@ -592,6 +692,15 @@ async function handle(req) {
     dispararAgente(lead.id);
     return { status:201, body:{ success:true, data:{ id:lead.id, owner_id:owner, kind } } };
   }
+  // ---- Chat do site: todo canal vira histórico dentro da oportunidade (M28) ----
+  if (method==='POST' && path==='/api/public/chat') {
+    const h = req.headers || {};
+    const key = h['x-intake-key'] || h['x-api-key'] || body.key;
+    if (key !== (process.env.INTAKE_KEY || 'nexxus-intake-dev'))
+      return { status:401, body:{ success:false, error:{ message:'Chave de captura inválida.' } } };
+    return receberChatDoSite(body);
+  }
+
   // ---- Patrícia inbound: e-mail que o cliente responde volta para a timeline ----
   if (method==='POST' && path==='/api/public/email/inbound') {
     const segredo = process.env.EMAIL_WEBHOOK_SECRET || '';
@@ -1122,6 +1231,29 @@ async function handle(req) {
     if (!prop.token) { prop.token = makeToken(); S.update('proposals', prop.id, { token: prop.token }); }
     return { status:200, body:{ success:true, data:{ link: baseUrl(req) + '/p/' + prop.token, status:prop.status, viewed_at:prop.viewed_at, accepted_at:prop.accepted_at } } };
   }
+  // ---- Chat do site: as conversas que ainda não viraram oportunidade ----
+  // Visitante curioso não entra no kanban, mas não pode sumir: fica aqui, com a conversa
+  // inteira, e o vendedor promove a oportunidade num clique quando enxergar valor.
+  if (method==='GET' && path==='/api/chat-sessions') {
+    const lm = byId('leads');
+    const rows = S.all('chat_sessions')
+      .sort((a,b)=> String(b.last_at||'').localeCompare(String(a.last_at||'')))
+      .map(c => ({ id:c.id, session_id:c.session_id, lead_id:c.lead_id, email:c.email, page:c.page,
+        last_at:c.last_at, promoted_at:c.promoted_at, total:(c.messages||[]).length,
+        lead_title: c.lead_id && lm[c.lead_id] ? lm[c.lead_id].title : null,
+        preview: ((c.messages||[]).filter(m=>m.role==='user')[0]||{}).content || '',
+        messages: c.messages || [] }));
+    return { status:200, body:{ success:true, data: rows } };
+  }
+  if ((m=P(/^\/api\/chat-sessions\/(\d+)\/promover$/)) && method==='POST') {
+    const sessao = S.get('chat_sessions', +m[1]); if (!sessao) return notfound();
+    if (sessao.lead_id) return { status:200, body:{ success:true, data:{ lead_id:sessao.lead_id, created:false } } };
+    const sinal = intencaoNoChat(sessao.messages || []);
+    const r = promoverChat(sessao, body.email || sinal.email, body.name);
+    log(r.leadId, user.id, 'note', 'Conversa do chat do site promovida a oportunidade manualmente.');
+    return { status:201, body:{ success:true, data:{ lead_id:r.leadId, created:r.criado } } };
+  }
+
   // ---- Tarefas ----
   if (method==='GET' && path==='/api/tasks') {
     const lm = byId('leads'), um = byId('users');

@@ -35,6 +35,7 @@ const app = createApp({
       email: 'joao@nexxustech.one', password: 'senha123', loginErr: '', loggingIn: false,
       // data
       meta: { stages: [], areas: [], users: [] },
+      chatSessions: [],
       fx: { rate: null, source: '', ts: 0 },
       leads: [], accounts: [], contacts: [], suppliers: [], products: [], tasks: [], users: [],
       config: null, report: null,
@@ -200,13 +201,32 @@ const app = createApp({
       });
     });
 
-    // Aba E-mail do drawer: só as atividades da conversa, em ordem cronológica.
+    // Aba Conversas do drawer: TODO canal dentro da oportunidade (decisão de 02/09) —
+    // e-mail e chat do site na mesma linha do tempo, em ordem cronológica.
+    const CANAL_DA_ATIVIDADE = { email_in:'email', email_out:'email', chat_in:'chat', chat_out:'chat' };
     const emailThread = computed(() => {
       if (!S.drawer) return [];
       return (S.drawer.activities || [])
-        .filter(a => a.type === 'email_in' || a.type === 'email_out')
-        .slice().reverse();
+        .filter(a => CANAL_DA_ATIVIDADE[a.type])
+        .slice().reverse()
+        .map(a => Object.assign({}, a, {
+          _mine: a.type === 'email_out' || a.type === 'chat_out',
+          _canal: CANAL_DA_ATIVIDADE[a.type],
+          _quem: a.type === 'email_out' ? 'Patrícia · e-mail'
+            : a.type === 'chat_out' ? 'Assistente · chat do site'
+            : a.type === 'chat_in' ? 'Cliente · chat do site'
+            : (a.email_from || 'Cliente'),
+        }));
     });
+    // Chat do site que ainda não virou oportunidade.
+    async function loadChatSessions(){ const r = await API.get('/api/chat-sessions'); if (r.ok) S.chatSessions = r.data.data; }
+    async function promoverChat(c){
+      const r = await API.post('/api/chat-sessions/' + c.id + '/promover', {});
+      if (!r.ok) { flash((r.data && r.data.error && r.data.error.message) || 'Erro ao promover.'); return; }
+      flash('Conversa virou oportunidade #' + r.data.data.lead_id + '.');
+      await loadChatSessions(); await loadLeads();
+      openLead(r.data.data.lead_id);
+    }
     async function loadProspects(){ const r = await API.get('/api/sdr/prospects'); if (r.ok) S.prospects = r.data.data; }
     async function runResearch(){
       if (S.researching) return; S.researching = true;
@@ -433,6 +453,7 @@ const app = createApp({
       if (r === '/sdr') loadProspects();
       if (r === '/bdr') loadBdr();
       if (r === '/faq') loadFaq();
+      if (r === '/chat') loadChatSessions();
     }
     watch(route, loadRoute, { immediate: false });
 
@@ -453,6 +474,7 @@ const app = createApp({
       channelLabel, originBadge,
       loadProspects, runResearch, importProspect, discardProspect, generateOutreach, runQualify, tierColor, fitColor,
       loadBdr, useBdrOption, resolveBdr, toggleAgentPause, maskLabel, emailThread, timelineItems,
+      loadChatSessions, promoverChat,
       loadFaq, addFaq, editFaq, cancelFaqEdit, saveFaqEdit, toggleFaq };
   },
   template: APP_TEMPLATE(),

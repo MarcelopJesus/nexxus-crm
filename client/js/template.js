@@ -38,6 +38,7 @@ function APP_TEMPLATE() { return `
     <div class="nav-item" :class="{active: route==='/'||route==='/dashboard'}" @click="go('/')"><span class="ic">▚</span> Dashboard</div>
     <div class="nav-item" :class="{active: route==='/funil'}" @click="go('/funil')"><span class="ic">▤</span> Funil de Vendas</div>
     <div class="nav-item" :class="{active: route==='/tarefas'}" @click="go('/tarefas'); loadTasks()"><span class="ic">✓</span> Tarefas & Follow-up</div>
+    <div class="nav-item" :class="{active: route==='/chat'}" @click="go('/chat'); loadChatSessions()"><span class="ic">💬</span> Chat do site</div>
     <div class="nav-item" :class="{active: route==='/sdr'}" @click="go('/sdr'); loadProspects()"><span class="ic">⚡</span> SDR Agent</div>
     <div class="nav-item" v-if="canArea('vendas')" :class="{active: route==='/bdr'}" @click="go('/bdr'); loadBdr()"><span class="ic">◈</span> BDR
       <span v-if="S.bdr.count" style="margin-left:auto;background:var(--nx-hot);color:#fff;border-radius:999px;font-size:10.5px;padding:1px 7px;font-weight:700">{{ S.bdr.count }}</span>
@@ -56,6 +57,7 @@ function APP_TEMPLATE() { return `
         <template v-if="route==='/'||route==='/dashboard'">Dashboard</template>
         <template v-else-if="route==='/funil'">Funil de Vendas</template>
         <template v-else-if="route==='/tarefas'">Tarefas & Follow-up</template>
+        <template v-else-if="route==='/chat'">Chat do site</template>
         <template v-else-if="route==='/sdr'">SDR Agent — Prospecção Inteligente</template>
         <template v-else-if="route==='/bdr'">BDR — Decisões do Agente Nexus</template>
         <template v-else-if="route==='/faq'">FAQ — Respostas oficiais do time</template>
@@ -166,6 +168,39 @@ function APP_TEMPLATE() { return `
             <p v-if="!(leadsByStage[s.key]||[]).length" class="muted small" style="padding:8px 6px">Vazio</p>
           </div>
         </div>
+      </div>
+
+      <!-- ===== CHAT DO SITE ===== -->
+      <!-- Conversa de visitante não entra no kanban (o funil é de oportunidade, não de
+           curioso). Fica aqui inteira, e vira oportunidade num clique quando valer. -->
+      <div v-else-if="route==='/chat'">
+        <p class="muted small mb">Conversas do chat do site. Quem demonstra intenção — deixa e-mail ou pede orçamento — vira oportunidade sozinho; as demais ficam aqui até alguém decidir.</p>
+        <div class="card card-p mb" v-for="c in S.chatSessions" :key="c.id">
+          <div class="flex between center wrap gap">
+            <div>
+              <b>{{ c.email || 'Visitante anônimo' }}</b>
+              <span class="chip" style="margin-left:8px">{{ c.total }} mensagens</span>
+              <span v-if="c.lead_id" class="badge won" style="margin-left:6px">virou oportunidade</span>
+            </div>
+            <div class="flex gap center">
+              <span class="muted small">{{ fmtDT(c.last_at) }}</span>
+              <button v-if="!c.lead_id" class="btn btn-sm" @click="promoverChat(c)">Virar oportunidade</button>
+              <button v-else class="btn btn-sm btn-ghost" @click="openLead(c.lead_id)">Abrir {{ c.lead_title || ('#'+c.lead_id) }}</button>
+            </div>
+          </div>
+          <details style="margin-top:10px">
+            <summary class="small muted" style="cursor:pointer">{{ c.preview ? ('“' + c.preview.slice(0,90) + '”') : 'ver a conversa' }}</summary>
+            <div v-for="(m,i) in c.messages" :key="i" style="margin-top:8px;display:flex"
+                 :style="{justifyContent: m.role==='assistant' ? 'flex-end' : 'flex-start'}">
+              <div style="max-width:78%;border-radius:14px;padding:9px 12px;font-size:13px;line-height:1.5"
+                   :style="{background: m.role==='assistant' ? 'rgba(0,113,227,.08)' : 'var(--nx-bg, #f5f5f7)', border:'1px solid var(--nx-border)'}">
+                <div class="muted" style="font-size:11px;font-weight:700;margin-bottom:3px">{{ m.role==='assistant' ? 'Assistente' : 'Visitante' }}</div>
+                <div style="white-space:pre-wrap">{{ m.content }}</div>
+              </div>
+            </div>
+          </details>
+        </div>
+        <p v-if="!S.chatSessions.length" class="muted small">Nenhuma conversa no chat do site ainda.</p>
       </div>
 
       <!-- ===== TAREFAS ===== -->
@@ -480,7 +515,7 @@ function DRAWER_TEMPLATE() { return `
         <div class="tab" :class="{active:S.drawerTab==='cotacao'}" @click="S.drawerTab='cotacao'">Cotação</div>
         <div class="tab" :class="{active:S.drawerTab==='precificacao'}" @click="S.drawerTab='precificacao'">Precificação</div>
         <div class="tab" :class="{active:S.drawerTab==='proposta'}" @click="S.drawerTab='proposta'">Proposta</div>
-        <div class="tab" :class="{active:S.drawerTab==='email'}" @click="S.drawerTab='email'">✉️ E-mail</div>
+        <div class="tab" :class="{active:S.drawerTab==='email'}" @click="S.drawerTab='email'">💬 Conversas</div>
         <div class="tab" :class="{active:S.drawerTab==='fechamento'}" @click="S.drawerTab='fechamento'">Fechamento</div>
         <div class="tab" :class="{active:S.drawerTab==='timeline'}" @click="S.drawerTab='timeline'">Timeline</div>
       </div>
@@ -700,21 +735,21 @@ function DRAWER_TEMPLATE() { return `
       <div v-if="S.drawerTab==='email'">
         <div class="card card-p">
           <div class="flex between center">
-            <div class="section-title" style="margin:0">Conversa por e-mail</div>
+            <div class="section-title" style="margin:0">Conversa com o cliente — todos os canais</div>
             <span class="chip">{{ S.drawer.lead.contact_email || 'contato sem e-mail' }}</span>
           </div>
           <div v-for="a in emailThread" :key="a.id" style="margin-top:12px;display:flex"
-            :style="{justifyContent: a.type==='email_out' ? 'flex-end' : 'flex-start'}">
+            :style="{justifyContent: a._mine ? 'flex-end' : 'flex-start'}">
             <div style="max-width:78%;border-radius:14px;padding:11px 14px;font-size:13px;line-height:1.55"
-              :style="{background: a.type==='email_out' ? 'rgba(0,113,227,.08)' : 'var(--nx-bg, #f5f5f7)', border:'1px solid var(--nx-border)'}">
+              :style="{background: a._mine ? 'rgba(0,113,227,.08)' : 'var(--nx-bg, #f5f5f7)', border:'1px solid var(--nx-border)'}">
               <div class="muted" style="font-size:11px;font-weight:700;margin-bottom:4px">
-                {{ a.type==='email_out' ? 'Patrícia · Nexxus Tech' : (a.email_from || 'Cliente') }} · {{ fmtDT(a.created_at) }}
+                {{ a._canal==='chat' ? '💬' : '✉️' }} {{ a._quem }} · {{ fmtDT(a.created_at) }}
               </div>
               <div v-if="a.email_subject" style="font-weight:600;margin-bottom:4px">{{ a.email_subject }}</div>
               <div style="white-space:pre-wrap">{{ a.email_body || a.message }}</div>
             </div>
           </div>
-          <p v-if="!emailThread.length" class="small muted mt">Nenhum e-mail trocado ainda. Tudo que a Patrícia enviar e tudo que o cliente responder aparece aqui.</p>
+          <p v-if="!emailThread.length" class="small muted mt">Nenhuma conversa ainda. E-mail da Patrícia, resposta do cliente e chat do site aparecem todos aqui.</p>
         </div>
       </div>
 
