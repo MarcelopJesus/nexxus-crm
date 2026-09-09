@@ -133,6 +133,33 @@ O agente **só liga com `AGENT_AUTOPILOT=on`**. Env ausente, vazia ou com qualqu
 deixa tudo desligado (fail-closed): o CRM funciona normalmente, na mão, como antes. O log de
 boot diz em qual estado subiu.
 
+## Chat do site (M28)
+
+O backend do site espelha cada troca do chat no CRM — mesma chave de captura do intake:
+
+```
+POST {BASE_URL}/api/public/chat
+x-intake-key: <INTAKE_KEY>
+
+{ "sessionId": "sess-123",
+  "messages": [ {"role":"user","content":"..."}, {"role":"assistant","content":"..."} ],
+  "email": "opcional", "page": "opcional" }
+```
+
+Mande a **conversa inteira da sessão** a cada troca: o CRM guarda o que ainda não tinha e
+ignora o resto (`novas: 0`). Quem decide se aquilo vira oportunidade é o CRM, não o site.
+
+- **Visitante curioso não vira card.** Fica na tela "Chat do site", com a conversa inteira e
+  um botão para promover à oportunidade quando o vendedor enxergar valor. O kanban é de
+  oportunidade, não de curioso.
+- **Intenção abre a oportunidade** — e-mail deixado no texto, ou pedido de orçamento, preço,
+  cotação, demonstração, licença. O lead nasce com `source: site-chat` e a conversa inteira
+  migra para a timeline dele; dali em diante cada mensagem nova cai direto na oportunidade.
+- `SITE_CHAT_AUTOLEAD=off` desliga a criação automática **sem perder conversa** — tudo
+  continua guardado, só não abre card sozinho.
+- A rota nunca derruba o chat: o site chama sem bloquear a resposta ao visitante, e a
+  conversa já está salva no banco do próprio site.
+
 ## Webhook de e-mail recebido (Resend Inbound)
 
 Aponte o Resend para `POST https://crm.nexxustech.one/api/public/email/inbound`, com o segredo
