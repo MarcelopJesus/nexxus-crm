@@ -6,7 +6,11 @@
 'use strict';
 
 function isConfigured() {
-  return !!(process.env.EMAIL_API_KEY && process.env.EMAIL_FROM);
+  // Basta ter a chave e ALGUM remetente. Exigir EMAIL_FROM fazia com que configurar só as
+  // três caixas novas derrubasse todo o envio para "não configurado".
+  const temRemetente = !!(process.env.EMAIL_FROM || process.env.EMAIL_FROM_VENDAS
+    || process.env.EMAIL_FROM_COMPRAS || process.env.EMAIL_FROM_FINANCEIRO);
+  return !!(process.env.EMAIL_API_KEY && temRemetente);
 }
 
 // ---- Caixas por função (decidido na presencial de 09/09) ----
@@ -31,7 +35,15 @@ const CAIXAS = {
 function remetenteDe(area) {
   const env = CAIXAS[String(area || '').toLowerCase()];
   const especifico = env ? process.env[env] : null;
-  return (especifico && especifico.trim()) || process.env.EMAIL_FROM || null;
+  if (especifico && especifico.trim()) return especifico.trim();
+  if (process.env.EMAIL_FROM) return process.env.EMAIL_FROM;
+  // Sem a caixa da área e sem a caixa geral, usa qualquer uma configurada em vez de não
+  // enviar: e-mail saindo pelo remetente vizinho é melhor que e-mail não saindo.
+  for (const nome of Object.values(CAIXAS)) {
+    const v = (process.env[nome] || '').trim();
+    if (v) return v;
+  }
+  return null;
 }
 
 // Para a tela de configuração e para o diagnóstico: quais caixas já existem de verdade.

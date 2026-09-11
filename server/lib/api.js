@@ -357,7 +357,7 @@ async function sendProposalEmail(o) {
     + `<p><a href="${link}" style="background:#0071E3;color:#fff;padding:12px 20px;border-radius:980px;text-decoration:none;font-weight:600">Ver proposta</a></p>`
     + `<p style="color:#86868B;font-size:13px">Ou copie: ${link}</p>`
     + SIGNATURE_HTML + `</div>`;
-  const r = await sendEmail({ to, subject, html });
+  const r = await sendEmail({ to, subject, html, area: 'vendas' });
   // Releitura OBRIGATÓRIA depois do await — sem caminho condicional. O e-mail já saiu (não
   // dá para desfazer), mas nenhuma ESCRITA acontece sobre um estado que mudou no meio.
   const conferido = revalidarProposta(prop.id, o.exigirEtapa);
@@ -551,7 +551,7 @@ async function responderPendenciaDeEmail(o) {
   const html = `<div style="font-family:Inter,Arial,sans-serif;color:#1D1D1F;font-size:15px;line-height:1.6">`
     + String(texto).split(/\n{2,}/).map(par => `<p>${escapeHtml(par).replace(/\n/g,'<br/>')}</p>`).join('')
     + SIGNATURE_HTML + `</div>`;
-  const envio = await sendEmail({ to: lead.contact_email, subject: assunto, html });
+  const envio = await sendEmail({ to: lead.contact_email, subject: assunto, html, area: 'vendas' });
   if (!envio.sent) return { sendFailed: envio.reason || ('status HTTP ' + envio.status) };
   logEmailOut(o.leadId, o.userId, lead.contact_email, assunto, texto, envio.id);
   limparPendenciaDeEmail(o.leadId);
@@ -710,7 +710,7 @@ async function processarEmailRecebido(body, req) {
     const pc = documentos.achar(leadId, 'PC');
     if (citaPC && pc && pc.status === 'open') {
       logEmailIn(leadId, from, assunto, texto);
-      const r = fluxo.aoReceberDoFornecedor({ log, notify }, leadId, { texto });
+      const r = fluxo.aoReceberDoFornecedor({ log, notify }, leadId, { texto, from });
       return { status:200, body:{ success:true, data:{ lead_id:leadId, fornecedor:true,
         conferido:r.ok, problemas:r.problemas || null } } };
     }
@@ -1132,7 +1132,7 @@ async function handle(req) {
       const corpo = `<div style="font-family:Inter,Arial,sans-serif;color:#1D1D1F;font-size:15px;line-height:1.6">`
         + texto.split(/\n{2,}/).map(p=>`<p>${escapeHtml(p).replace(/\n/g,'<br/>')}</p>`).join('')
         + SIGNATURE_HTML + `</div>`;
-      envio = await sendEmail({ to:j.contact_email, subject:assunto, html:corpo });
+      envio = await sendEmail({ to:j.contact_email, subject:assunto, html:corpo, area: 'vendas' });
       if (envio.sent) logEmailOut(id, user.id, j.contact_email, assunto, texto, envio.id);
     }
     // Memória da decisão: fica no lead para as PRÓXIMAS máscaras saberem que essa

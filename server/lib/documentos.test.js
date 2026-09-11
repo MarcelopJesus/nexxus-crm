@@ -41,7 +41,7 @@ test('o PV NÃO fecha enquanto o pedido de compra estiver aberto', async () => {
   // É a chave voltando do fornecedor que destrava o ciclo de vendas.
   const id = await pedidoPago('Cliente Dois');
   docs.abrir(id, 'PC');
-  const r = docs.fechar(id, 'PV', 'chave e book enviados', { chave:'ABC-123', book:true });
+  const r = docs.fechar(id, 'PV', 'chave e book enviados', { chave:'ABC-123', book:true, messageId:'msg_test_1' });
   assert.equal(r.ok, false);
   assert.match(r.razao, /pedido de compra ainda está aberto/);
   assert.equal(docs.achar(id, 'PV').status, 'open');
@@ -51,7 +51,7 @@ test('o PC fecha antes; só então o PV pode fechar', async () => {
   const id = await pedidoPago('Cliente Tres');
   docs.abrir(id, 'PC');
   assert.equal(docs.fechar(id, 'PC', 'chave recebida da Ampler').ok, true);
-  const r = docs.fechar(id, 'PV', 'chave e book enviados ao cliente', { chave:'ABC-123', book:true });
+  const r = docs.fechar(id, 'PV', 'chave e book enviados ao cliente', { chave:'ABC-123', book:true, messageId:'msg_test_1' });
   assert.equal(r.ok, true);
   assert.equal(docs.achar(id, 'PV').status, 'close');
   assert.equal(docs.entregue(id), true);
@@ -131,4 +131,18 @@ test('a API entrega os documentos junto do lead', async () => {
   const naLista = lista.body.data.find(l => l.id === id);
   assert.ok(Array.isArray(naLista.documentos));
   assert.equal(naLista.documentos[0].tipo, 'PV');
+});
+
+test('o PV não fecha sem a prova de que o e-mail de entrega saiu', async () => {
+  // Achado do Codex: qualquer chamador fechava com {chave, book:true} — querer enviar não
+  // é ter enviado, e o cliente continuaria sem receber nada.
+  const id = await pedidoPago('Sem Prova De Envio');
+  docs.abrir(id, 'PC');
+  docs.fechar(id, 'PC', 'chave recebida');
+  const semId = docs.fechar(id, 'PV', 'entreguei', { chave:'X1-2345-6789', book:true });
+  assert.equal(semId.ok, false);
+  assert.match(semId.razao, /sem id do provedor/);
+  const comId = docs.fechar(id, 'PV', 'entreguei', { chave:'X1-2345-6789', book:true, messageId:'msg_prov_99' });
+  assert.equal(comId.ok, true);
+  assert.equal(docs.achar(id, 'PV').entrega.message_id, 'msg_prov_99', 'a prova fica registrada');
 });

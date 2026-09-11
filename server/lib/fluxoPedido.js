@@ -157,23 +157,115 @@ function aoConfirmarPagamento(deps, leadId) {
 // Tira a chave de licença do corpo do e-mail. Deliberadamente CONSERVADOR: só aceita o
 // que estiver rotulado ("chave: XXX", "license key: XXX"). Um e-mail de fornecedor tem
 // número de nota, CNPJ e código de produto no meio do texto — adivinhar qual deles é a
-// licença entregaria lixo ao cliente. Não achou rótulo, devolve null e vira divergência,
-// que é o comportamento seguro.
-// O último caractere tem que ser alfanumérico: a pontuação da frase ("...chave: ABC-123.")
-// entrava na captura e o cliente receberia uma licença com um ponto a mais, que não ativa.
-const ROTULOS_CHAVE = /(?:chave(?:\s+de\s+licen[çc]a)?|licen[çc]a|license\s*key|serial|activation\s*key)\s*[:\-–]\s*([A-Za-z0-9](?:[A-Za-z0-9\-_.]{4,}[A-Za-z0-9]))/i;
+// licença entregaria lixo ao cliente.
+//
+// Três coisas que a revisão mostrou serem obrigatórias aqui, todas com o mesmo motivo —
+// chave errada é pior que chave nenhuma, porque vira e-mail entregue ao cliente com uma
+// licença que não ativa:
+//   - o último caractere tem que ser alfanumérico, senão a pontuação da frase entra junto
+//   - a captura não pode parar no primeiro espaço ou quebra de linha: chave partida em
+//     duas linhas ou com marcação HTML no meio virava metade da chave
+//   - duas chaves no mesmo e-mail ("key: VELHA (cancelada). Replacement key: NOVA") NÃO
+//     podem ser resolvidas no chute: viram ambiguidade
+const RE_ROTULO = /(?:chave(?:\s+de\s+licen[çc]a)?|licen[çc]a|license\s*key|serial|activation\s*key)\s*[:\-–]\s*/gi;
+
+// Limpa marcação e junta o que a formatação partiu, antes de procurar a chave.
+function normalizaCorpo(texto) {
+  return String(texto || '')
+    .replace(/<[^>]+>/g, '')           // marcação HTML no meio da chave
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/\r/g, '');
+}
+
+// Um candidato é a sequência de caracteres de chave logo depois do rótulo, aceitando que
+// ela venha quebrada por espaço ou fim de linha — desde que os pedaços sejam claramente
+// parte da chave (blocos alfanuméricos separados por espaço único ou quebra simples).
+// Um pedaço só continua a chave se ele PARECE chave: maiúsculas e dígitos, nada de
+// palavra comum. Sem esse filtro, "chave: ABC-123. Abraços" engolia a despedida.
+const PEDACO_DE_CHAVE = /^[A-Z0-9][A-Z0-9\-_]{1,}$/;
+
+function candidatosDeChave(texto) {
+  const limpo = normalizaCorpo(texto);
+  const achados = [];
+  RE_ROTULO.lastIndex = 0;
+  let m;
+  while ((m = RE_ROTULO.exec(limpo)) !== null) {
+    const resto = limpo.slice(m.index + m[0].length);
+    const pedacos = resto.split(/[ \n]+/);
+    const partes = [];
+    for (let i = 0; i < pedacos.length; i++) {
+      const cru = pedacos[i];
+      const limpoPedaco = cru.replace(/[^A-Za-z0-9\-_.]+$/, '');   // tira pontuação de frase
+      if (i === 0) {
+        if (!/^[A-Za-z0-9]/.test(limpoPedaco)) break;
+        partes.push(limpoPedaco);
+        // A chave continua na próxima linha só quando esta terminou pendurada num hífen.
+        if (!/[-_]$/.test(limpoPedaco)) {
+          // sem hífen pendurado, ainda pode haver bloco seguinte em caixa alta (chave em
+          // grupos: "ABCD 1234 EFGH"); o filtro abaixo decide.
+        }
+        continue;
+      }
+      if (PEDACO_DE_CHAVE.test(limpoPedaco)) partes.push(limpoPedaco);
+      else break;
+    }
+    const chave = partes.join('').replace(/[.\-_]+$/, '');
+    if (chave.length >= 6) achados.push(chave);
+  }
+  return [...new Set(achados)];
+}
 
 function extrairChave(texto) {
-  if (!texto) return null;
-  const m = String(texto).match(ROTULOS_CHAVE);
-  return m ? m[1].trim() : null;
+  const c = candidatosDeChave(texto);
+  return c.length === 1 ? c[0] : null;   // zero ou ambíguo = null, e null vira divergência
 }
 
 // A fatura vem no mesmo e-mail ou em outro, para o financeiro. Serve para abrir o NXT-FIN.
 const SINAL_FATURA = /(fatura|invoice|nota\s*fiscal|boleto|cobran[çc]a)/i;
+// Rodapé jurídico é a armadilha: "esta mensagem não constitui fatura nem cobrança" abria
+// um ciclo financeiro do nada. Frase negada não conta.
+const NEGACAO_FATURA = /\b(n[ãa]o\s+(?:[a-zçãéêíóú]+\s+){0,3}(?:constitui|[ée]|ser[áa]|representa|vale\s+como)|sem)\s+(?:uma\s+)?(?:fatura|invoice|nota\s*fiscal|boleto|cobran[çc]a)/i;
 
 function pareceFatura(texto) {
-  return !!(texto && SINAL_FATURA.test(String(texto)));
+  if (!texto) return false;
+  const t = normalizaCorpo(texto);
+  if (NEGACAO_FATURA.test(t)) return false;
+  return SINAL_FATURA.test(t);
+}
+
+/**
+ * O remetente é mesmo o fornecedor deste pedido?
+ *
+ * Sem esta conferência, QUALQUER pessoa com um domínio próprio e SPF/DKIM em ordem podia
+ * mandar "NXT-PC-0042 — license key: FALSA", e o CRM fecharia o pedido de compra e
+ * mandaria a chave falsa para o cliente. Autenticação de e-mail prova de onde a mensagem
+ * saiu, não que quem mandou é o nosso fornecedor.
+ *
+ * Fail-closed: fornecedor sem e-mail/domínio cadastrado NÃO tem resposta aceita. Melhor o
+ * e-mail cair no caminho normal (um humano lê) do que fechar pedido no escuro.
+ */
+function remetenteEhDoFornecedor(lead, from) {
+  const remetente = String(from || '').trim().toLowerCase();
+  if (!remetente.includes('@')) return { ok: false, razao: 'remetente inválido' };
+  const dominio = remetente.split('@').pop();
+
+  const produto = lead && lead.product_id ? store.get('products', lead.product_id) : null;
+  const fornecedor = produto && produto.supplier_id ? store.get('suppliers', produto.supplier_id) : null;
+  if (!fornecedor) return { ok: false, razao: 'pedido sem fornecedor cadastrado' };
+
+  const permitidos = []
+    .concat(fornecedor.email ? [String(fornecedor.email).toLowerCase()] : [])
+    .concat(fornecedor.dominio ? [String(fornecedor.dominio).toLowerCase()] : [])
+    .concat(fornecedor.domain ? [String(fornecedor.domain).toLowerCase()] : []);
+  if (!permitidos.length) {
+    return { ok: false, razao: `fornecedor ${fornecedor.name} está sem e-mail/domínio cadastrado` };
+  }
+
+  const bate = permitidos.some(p => {
+    const alvo = p.replace(/^@/, '');
+    return remetente === alvo || dominio === alvo || dominio.endsWith('.' + alvo);
+  });
+  return bate ? { ok: true, fornecedor } : { ok: false, razao: `remetente ${remetente} não é do fornecedor ${fornecedor.name}` };
 }
 
 /**
@@ -190,6 +282,14 @@ function aoReceberDoFornecedor(deps, leadId, entrada) {
   if (!lead) return { ok: false, razao: 'lead inexistente' };
   const pc = documentos.achar(leadId, 'PC');
   if (!pc) return { ok: false, razao: 'não há pedido de compra para este lead' };
+
+  // Só o fornecedor deste pedido fecha este pedido.
+  const quem = remetenteEhDoFornecedor(lead, entrada && entrada.from);
+  if (!quem.ok) {
+    deps.log(leadId, null, 'fluxo', `[compras] E-mail citando ${pc.codigo} NÃO foi aceito como resposta do fornecedor: ${quem.razao}.`);
+    deps.notify('fluxo_remetente', `E-mail citando ${pc.codigo} veio de remetente não reconhecido (${quem.razao}). Nada foi fechado — confira à mão.`, leadId);
+    return { ok: false, razao: quem.razao, remetenteRecusado: true };
+  }
 
   const texto = (entrada && entrada.texto) || '';
   const chave = extrairChave(texto);
@@ -236,4 +336,4 @@ function confirmarEntregaAoCliente(deps, leadId, prova) {
 }
 
 module.exports = { ETAPAS, etapa, ligado, registrar, conferir, textoPedidoDeCompra, aoConfirmarPagamento,
-  extrairChave, pareceFatura, aoReceberDoFornecedor, confirmarEntregaAoCliente };
+  extrairChave, candidatosDeChave, pareceFatura, aoReceberDoFornecedor, confirmarEntregaAoCliente, remetenteEhDoFornecedor };

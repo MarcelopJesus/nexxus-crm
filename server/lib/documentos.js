@@ -84,12 +84,18 @@ function fechar(leadId, tipo, motivo, entrega) {
     if (!e.book) {
       return { ok: false, razao: 'o PV só fecha com o book de instalação enviado junto da chave' };
     }
+    // Prova de que o e-mail SAIU, não só de que alguém quis enviar: o id que o provedor
+    // devolve. Sem isto, qualquer chamador fechava o pedido com `{chave:'x', book:true}`
+    // e o cliente continuava sem receber nada.
+    if (!String(e.messageId || '').trim()) {
+      return { ok: false, razao: 'o PV só fecha com o e-mail de entrega efetivamente enviado (sem id do provedor)' };
+    }
   }
 
   const atualizado = store.update('documents', doc.id, {
     status: FECHADO, closed_at: store.now(), motivo: motivo || null,
     // Guarda a PROVA, não a chave: o valor da licença não fica repetido no histórico.
-    entrega: t === 'PV' ? { chave_registrada: true, book: true, em: store.now() } : null,
+    entrega: t === 'PV' ? { chave_registrada: true, book: true, message_id: String(entrega.messageId), em: store.now() } : null,
   });
   return { ok: true, doc: atualizado };
 }
