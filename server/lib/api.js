@@ -9,6 +9,8 @@ const sdr = require('./sdr');
 const catalog = require('./catalogSync');
 const faq = require('./faq');
 const docnum = require('./docnum');
+const documentos = require('./documentos');
+const fluxo = require('./fluxoPedido');
 const S = store; // alias
 
 const STAGES = [
@@ -493,6 +495,7 @@ function leadWithJoins(id) {
     // Os códigos são derivados do sequencial na saída, nunca guardados prontos: assim OP,
     // PV e PC não têm como divergir entre si nem ficar velhos quando o SKU muda.
     doc: docnum.codigosDoLead(l),
+    documentos: documentos.resumo(l.id),
   });
 }
 
@@ -814,9 +817,16 @@ async function handle(req) {
         requested_software: items||message, source:'checkout', stage:'proposta_enviada', owner_id:owner, hot:0,
         status:'won', lost_reason:null, estimated_value: valueNum||null, qty:qtyNum, kind, preferred_channel:preferredChannel,
         doc_seq: docSeq, doc_sku: docSku, doc_pago_em: S.now(),
-        notes: 'Pedido pago via site'+(cf.pedido_id?(' (#'+cf.pedido_id+')'):'')+(items?('\nItens: '+items):''), updated_at:S.now() });
+        // O protocolo TEM que entrar nas notas também no pedido pago: a deduplicação lá em
+        // cima procura exatamente esta marca. Sem ela, webhook do Stripe repetido criava um
+        // segundo lead pago — com PV, PC, rascunho e notificações em dobro.
+        notes: 'Pedido pago via site'+(cf.pedido_id?(' (#'+cf.pedido_id+')'):'')+(items?('\nItens: '+items):'')+(protocol?('\nProtocolo site: '+protocol):''), updated_at:S.now() });
       log(lead.id, owner, 'close', 'Pedido pago no site — negócio GANHO'+(cf.pedido_id?(' (pedido #'+cf.pedido_id+')'):'')+'. Valor R$ '+valueNum.toLocaleString('pt-BR')+'.');
-      log(lead.id, owner, 'note', 'Documentos: '+docnum.formatar('OP',docSeq)+' → '+docnum.formatar('PV',docSeq,docSku)+' (pagamento confirmado no site).');
+      // O fluxo das 7 etapas começa aqui: abre o PV, registra a timeline e deixa o pedido
+      // de compra pronto. Com FLUXO_POS_PAGAMENTO desligado (o padrão) nada sai para fora —
+      // o e-mail ao fornecedor fica como rascunho esperando um humano.
+      const andamento = fluxo.aoConfirmarPagamento({ log, notify }, lead.id);
+      log(lead.id, owner, 'doc', 'Pedido de venda '+andamento.pv.codigo+' aberto — pagamento confirmado. Fecha quando a chave e o book forem enviados ao cliente.');
       notify('order_paid', `Pedido pago no site: ${companyName} — R$ ${valueNum.toLocaleString('pt-BR')}.`, lead.id);
       return { status:201, body:{ success:true, data:{ id:lead.id, owner_id:owner, kind:'order' } } };
     }
