@@ -50,6 +50,17 @@ function proximoSeq() {
   return store.nextId('nxt_doc');
 }
 
+// Adotar um número que veio de fora sem mexer no contador criaria colisão garantida:
+// com o contador em 41, adotar o 42 faz o PRÓXIMO pedido sem código receber 42 também, e
+// os dois passam a responder ao mesmo e-mail. Empurra o contador para frente.
+function reservarSeq(seq) {
+  const n = Number(seq);
+  if (!Number.isInteger(n) || n <= 0) return null;
+  const atual = Number(store.data.seq['nxt_doc'] || 0);
+  if (n > atual) { store.data.seq['nxt_doc'] = n; store.save(); }
+  return n;
+}
+
 // Abre um pedido novo: reserva o número e devolve já formatado como oportunidade.
 function novaOportunidade() {
   const seq = proximoSeq();
@@ -102,5 +113,5 @@ function codigosDoLead(lead) {
   };
 }
 
-module.exports = { TIPOS, PREFIXO, formatar, normalizaSku, proximoSeq, novaOportunidade,
+module.exports = { TIPOS, PREFIXO, formatar, normalizaSku, proximoSeq, reservarSeq, novaOportunidade,
   extrair, extrairTodos, codigosDoLead };

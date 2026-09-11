@@ -32,19 +32,36 @@ function seqDoIntake(body, cf) {
     cf && cf.doc, cf && cf.codigo, cf && cf.protocolo];
   for (const c of candidatos) {
     const achado = docnum.extrair(c);
-    if (achado) return achado.seq;
+    if (!achado) continue;
+    // O intake é público (só protegido pela chave). Adotar um número que JÁ pertence a
+    // outro pedido deixaria dois leads com o mesmo código, e o e-mail do cliente cairia
+    // em qualquer um dos dois. Número já usado: ignora o que veio e abre um novo.
+    const jaExiste = S.findOne('leads', l => Number(l.doc_seq) === achado.seq);
+    if (jaExiste) break;
+    return docnum.reservarSeq(achado.seq) || docnum.proximoSeq();
   }
   return docnum.proximoSeq();
 }
 
-// Acha o lead dono de um código NXT citado em qualquer texto.
+// Acha o lead dono de um código NXT citado num texto.
+//
+// Duas regras que não são óbvias:
+//  - Encaminhamento cita mais de um pedido ("segue o NXT-OP-0010 ... sobre o NXT-OP-0020").
+//    Pegar o primeiro é chute. Quando os códigos apontam para leads DIFERENTES, ninguém
+//    casa — cai no message-id/remetente, e no pior caso um humano decide.
+//  - Lead perdido não recebe e-mail por código: 'lost' é decisão tomada, e ressuscitar
+//    silenciosamente um negócio morto esconde o que está acontecendo. 'won' recebe, sim —
+//    é o pós-venda do pedido, que é justamente o que a numeração veio permitir.
 function leadPorCodigo(texto) {
   const achados = docnum.extrairTodos(texto);
+  if (!achados.length) return null;
+  const ids = [];
   for (const a of achados) {
-    const lead = S.findOne('leads', l => Number(l.doc_seq) === a.seq);
-    if (lead) return lead.id;
+    const lead = S.findOne('leads', l => Number(l.doc_seq) === a.seq && l.status !== 'lost');
+    if (lead && !ids.includes(lead.id)) ids.push(lead.id);
   }
-  return null;
+  if (ids.length !== 1) return null;
+  return ids[0];
 }
 function touchLead(id){ S.update('leads', id, { updated_at: S.now() }); }
 // A margem aceitável (M30) chegou depois: instalação antiga não tem o campo gravado.
@@ -1735,5 +1752,5 @@ module.exports = { handle, log, notify, leadWithJoins, clientName, OPCOES_RECUSA
   abrirPendenciaDeEmail, limparPendenciaDeEmail, responderPendenciaDeEmail,
   logEmailIn, logEmailOut, anotarResumoEmail, SIGNATURE_TEXT, SIGNATURE_HTML,
   timestampRecente, assinaturaValida, extraiEmail, stripHtml,
-  respostaAutomatica, autenticacaoFalhou, leadPorReferencia, limiteDeCriacao, _resetLimiteCriacao,
+  respostaAutomatica, autenticacaoFalhou, leadPorReferencia, leadPorCodigo, limiteDeCriacao, _resetLimiteCriacao,
   reservarEvento, fecharEvento, liberarEvento };

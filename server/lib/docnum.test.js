@@ -14,7 +14,8 @@ process.env.INTAKE_KEY = 'chave-de-teste';
 const store = require('./store');
 const { seedIfEmpty } = require('./seed');
 const docnum = require('./docnum');
-const { handle } = require('./api');
+const api = require('./api');
+const { handle } = api;
 
 seedIfEmpty();
 after(async () => { await new Promise(r => setTimeout(r, 60)); try { fs.unlinkSync(DB_FILE); } catch {} });
@@ -154,4 +155,58 @@ test('a API devolve os códigos junto do lead, para a tela poder mostrar', async
   assert.match(naLista.doc.op, /^NXT-OP-\d{4}$/);
   // derivados na saída, nunca gravados prontos: OP e PV não podem divergir
   assert.equal(naLista.doc.seq, store.get('leads', r.body.data.id).doc_seq);
+});
+
+// ---- achados da revisão do Codex (10/09), cada um travado por um teste ----
+
+test('adotar um número futuro empurra o contador — senão o próximo pedido colide', async () => {
+  // Cenário do Codex: contador em N, site manda N+1, contador não anda, e o pedido
+  // SEGUINTE recebe N+1 também. Dois leads com o mesmo código = e-mail no card errado.
+  const r1 = await intake({ companyName:'Salta Numero Ltda', contactName:'E', email:'e@salta.com',
+    doc:'NXT-OP-8800' });
+  assert.equal(store.get('leads', r1.body.data.id).doc_seq, 8800);
+  const r2 = await intake({ companyName:'Depois Dele SA', contactName:'F', email:'f@depois.com' });
+  const seq2 = store.get('leads', r2.body.data.id).doc_seq;
+  assert.ok(seq2 > 8800, `o próximo número tem que passar de 8800, veio ${seq2}`);
+});
+
+test('número já usado não é adotado — abre um novo em vez de duplicar', async () => {
+  // O intake é público. Sem isto, mandar o código de outro cliente criaria dois leads com
+  // o mesmo número, e a resposta do cliente cairia em qualquer um dos dois.
+  const r1 = await intake({ companyName:'Dona Do Numero SA', contactName:'G', email:'g@dona.com',
+    doc:'NXT-OP-7700' });
+  const r2 = await intake({ companyName:'Tentou Roubar ME', contactName:'H', email:'h@roubar.com',
+    doc:'NXT-OP-7700' });
+  const l1 = store.get('leads', r1.body.data.id), l2 = store.get('leads', r2.body.data.id);
+  assert.equal(l1.doc_seq, 7700);
+  assert.notEqual(l2.doc_seq, 7700, 'o segundo não pode ficar com o número do primeiro');
+  const comEsse = store.find('leads', l => Number(l.doc_seq) === 7700);
+  assert.equal(comEsse.length, 1, 'só um lead pode responder por um número');
+});
+
+test('e-mail que cita dois pedidos diferentes não casa com nenhum', async () => {
+  // Encaminhamento cita o pedido antigo e o atual. Pegar o primeiro é chute; melhor cair
+  // no message-id/remetente do que anexar a conversa ao pedido errado.
+  const a = await intake({ companyName:'Citada A', contactName:'I', email:'i@a.com' });
+  const b = await intake({ companyName:'Citada B', contactName:'J', email:'j@b.com' });
+  const ca = docnum.formatar('OP', store.get('leads', a.body.data.id).doc_seq);
+  const cb = docnum.formatar('OP', store.get('leads', b.body.data.id).doc_seq);
+  assert.equal(api.leadPorCodigo(`encaminhado: ${ca} ... e agora sobre o ${cb}`), null);
+  // um código só continua casando normalmente
+  assert.equal(api.leadPorCodigo(`sobre o ${ca}`), a.body.data.id);
+  // o mesmo código repetido não conta como dois
+  assert.equal(api.leadPorCodigo(`${ca} e de novo ${ca}`), a.body.data.id);
+});
+
+test('pedido pago recebe e-mail por código; pedido perdido não', async () => {
+  const r = await intake({ contactName:'Pos Venda', email:'pos@venda.com', value:100,
+    customFields:{ origem:'nexxustech.ia.br/checkout', nome:'Pos Venda' } });
+  const lead = store.get('leads', r.body.data.id);
+  const cod = docnum.formatar('PV', lead.doc_seq, lead.doc_sku);
+  // 'won' recebe: é o pós-venda do pedido, exatamente o que a numeração veio permitir
+  assert.equal(api.leadPorCodigo(`sobre o ${cod}`), lead.id);
+  // 'lost' não: ressuscitar negócio morto em silêncio esconde o que está acontecendo
+  store.update('leads', lead.id, { status:'lost' });
+  assert.equal(api.leadPorCodigo(`sobre o ${cod}`), null);
+  store.update('leads', lead.id, { status:'won' });
 });
