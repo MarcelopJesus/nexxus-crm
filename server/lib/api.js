@@ -701,6 +701,21 @@ async function processarEmailRecebido(body, req) {
       .sort((a,b)=> String(b.updated_at||b.created_at||'').localeCompare(String(a.updated_at||a.created_at||'')));
     if (abertos.length) leadId = abertos[0].id;
   }
+  // Resposta do FORNECEDOR: e-mail que cita um pedido de COMPRA nosso (NXT-PC) num lead
+  // que tem esse pedido aberto. É a etapa 5 do fluxo de 09/09, e não segue o caminho do
+  // cliente — quem responde aqui não é quem compra, é quem vende para a gente.
+  if (leadId) {
+    const citados = docnum.extrairTodos(assunto + '\n' + texto);
+    const citaPC = citados.some(c => c.tipo === 'PC');
+    const pc = documentos.achar(leadId, 'PC');
+    if (citaPC && pc && pc.status === 'open') {
+      logEmailIn(leadId, from, assunto, texto);
+      const r = fluxo.aoReceberDoFornecedor({ log, notify }, leadId, { texto });
+      return { status:200, body:{ success:true, data:{ lead_id:leadId, fornecedor:true,
+        conferido:r.ok, problemas:r.problemas || null } } };
+    }
+  }
+
   let novo = false;
   if (!leadId) {
     // Antes de criar lead: trava de enxurrada. Sem ela, um spammer vira milhares de

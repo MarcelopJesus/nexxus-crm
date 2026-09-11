@@ -9,6 +9,41 @@ function isConfigured() {
   return !!(process.env.EMAIL_API_KEY && process.env.EMAIL_FROM);
 }
 
+// ---- Caixas por função (decidido na presencial de 09/09) ----
+//
+// A regra de roteamento que o Ítalo cravou: "tudo que se relaciona com cliente é vendas;
+// relacionamento com a Ampler é sempre compras". O financeiro só recebe fatura.
+//
+//   vendas     → cliente          EMAIL_FROM_VENDAS
+//   compras    → fornecedor       EMAIL_FROM_COMPRAS
+//   financeiro → faturas          EMAIL_FROM_FINANCEIRO
+//
+// Enquanto essas caixas não existirem de verdade (elas dependem do provedor de e-mail,
+// não do código), TUDO cai na caixa única de hoje. Assim o dia em que forem criadas é
+// só preencher três variáveis — nenhuma linha de código muda, e nada quebra nesse meio
+// tempo, que é o estado em que o sistema está agora.
+const CAIXAS = {
+  vendas: 'EMAIL_FROM_VENDAS',
+  compras: 'EMAIL_FROM_COMPRAS',
+  financeiro: 'EMAIL_FROM_FINANCEIRO',
+};
+
+function remetenteDe(area) {
+  const env = CAIXAS[String(area || '').toLowerCase()];
+  const especifico = env ? process.env[env] : null;
+  return (especifico && especifico.trim()) || process.env.EMAIL_FROM || null;
+}
+
+// Para a tela de configuração e para o diagnóstico: quais caixas já existem de verdade.
+function caixasConfiguradas() {
+  const saida = {};
+  for (const [area, env] of Object.entries(CAIXAS)) {
+    const v = (process.env[env] || '').trim();
+    saida[area] = { variavel: env, endereco: v || null, propria: !!v, usando: remetenteDe(area) };
+  }
+  return saida;
+}
+
 // Tudo que sai daqui é máquina falando (a Patrícia), nunca uma pessoa digitando. Estes
 // cabeçalhos são o que impede o autoresponder do outro lado de responder de volta e os
 // dois robôs entrarem em pingue-pongue infinito. Ficam no mailer, e não em cada chamador,
@@ -20,10 +55,11 @@ const HEADERS_AUTOMATICO = {
 
 // Devolve { sent, status, id } — o id é o message-id do provedor, guardado na timeline
 // para casar a resposta do cliente (In-Reply-To) com o lead certo.
-async function sendEmail({ to, subject, html, headers, replyTo }) {
+async function sendEmail({ to, subject, html, headers, replyTo, area }) {
   if (!isConfigured()) return { sent: false, reason: 'not_configured' };
   const provider = (process.env.EMAIL_PROVIDER || 'resend').toLowerCase();
-  const from = process.env.EMAIL_FROM;
+  // `area` escolhe a caixa; sem ela (ou sem caixa própria) continua a de sempre.
+  const from = remetenteDe(area);
   const key = process.env.EMAIL_API_KEY;
   const cabecalhos = Object.assign({}, HEADERS_AUTOMATICO, headers || {});
   try {
@@ -56,4 +92,4 @@ async function sendEmail({ to, subject, html, headers, replyTo }) {
   }
 }
 
-module.exports = { sendEmail, isConfigured, HEADERS_AUTOMATICO };
+module.exports = { sendEmail, isConfigured, remetenteDe, caixasConfiguradas, CAIXAS, HEADERS_AUTOMATICO };

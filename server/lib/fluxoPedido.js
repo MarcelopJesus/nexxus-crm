@@ -151,4 +151,89 @@ function aoConfirmarPagamento(deps, leadId) {
   return { ok: true, pv, pc, email, enviado: false, liberado: ligado() };
 }
 
-module.exports = { ETAPAS, etapa, ligado, registrar, conferir, textoPedidoDeCompra, aoConfirmarPagamento };
+
+// ---- Etapas 5 a 7: a volta do fornecedor ----
+
+// Tira a chave de licença do corpo do e-mail. Deliberadamente CONSERVADOR: só aceita o
+// que estiver rotulado ("chave: XXX", "license key: XXX"). Um e-mail de fornecedor tem
+// número de nota, CNPJ e código de produto no meio do texto — adivinhar qual deles é a
+// licença entregaria lixo ao cliente. Não achou rótulo, devolve null e vira divergência,
+// que é o comportamento seguro.
+// O último caractere tem que ser alfanumérico: a pontuação da frase ("...chave: ABC-123.")
+// entrava na captura e o cliente receberia uma licença com um ponto a mais, que não ativa.
+const ROTULOS_CHAVE = /(?:chave(?:\s+de\s+licen[çc]a)?|licen[çc]a|license\s*key|serial|activation\s*key)\s*[:\-–]\s*([A-Za-z0-9](?:[A-Za-z0-9\-_.]{4,}[A-Za-z0-9]))/i;
+
+function extrairChave(texto) {
+  if (!texto) return null;
+  const m = String(texto).match(ROTULOS_CHAVE);
+  return m ? m[1].trim() : null;
+}
+
+// A fatura vem no mesmo e-mail ou em outro, para o financeiro. Serve para abrir o NXT-FIN.
+const SINAL_FATURA = /(fatura|invoice|nota\s*fiscal|boleto|cobran[çc]a)/i;
+
+function pareceFatura(texto) {
+  return !!(texto && SINAL_FATURA.test(String(texto)));
+}
+
+/**
+ * Chamado quando chega e-mail que cita um pedido de compra nosso.
+ *
+ * Encadeia as etapas 5, 6 e 7. A 7 (entrega ao cliente) NÃO envia: depende da caixa
+ * @vendas e do freio. Fica como rascunho, igual à etapa 4.
+ */
+function aoReceberDoFornecedor(deps, leadId, entrada) {
+  if (!deps || typeof deps.log !== 'function' || typeof deps.notify !== 'function') {
+    throw new Error('aoReceberDoFornecedor exige deps.log e deps.notify');
+  }
+  const lead = store.get('leads', leadId);
+  if (!lead) return { ok: false, razao: 'lead inexistente' };
+  const pc = documentos.achar(leadId, 'PC');
+  if (!pc) return { ok: false, razao: 'não há pedido de compra para este lead' };
+
+  const texto = (entrada && entrada.texto) || '';
+  const chave = extrairChave(texto);
+
+  registrar(deps, leadId, 'fornecedor_devolve', chave ? 'chave recebida' : 'sem chave reconhecível no e-mail');
+
+  // A fatura abre o ciclo financeiro, que corre por fora e não segura a entrega.
+  if (pareceFatura(texto)) {
+    const fin = documentos.abrir(leadId, 'FIN');
+    deps.log(leadId, null, 'doc', `Ciclo financeiro ${fin.codigo} aberto — fatura do fornecedor recebida. Fecha quando for paga e o comprovante voltar.`);
+  }
+
+  // Etapa 6: o double-check. Divergência PARA aqui e chama gente — não entrega, não fecha.
+  const conferencia = conferir(lead, { chave, qty: entrada && entrada.qty, sku: entrada && entrada.sku, seq: entrada && entrada.seq });
+  if (!conferencia.ok) {
+    deps.log(leadId, null, 'fluxo', `[compras] Conferência REPROVADA: ${conferencia.problemas.join('; ')}. Nada foi entregue ao cliente.`);
+    deps.notify('fluxo_divergencia', `Pedido ${pc.codigo}: o que o fornecedor mandou não bate — ${conferencia.problemas.join('; ')}.`, leadId);
+    return { ok: false, razao: 'divergência na conferência', problemas: conferencia.problemas, chave: null };
+  }
+  registrar(deps, leadId, 'compras_confere', 'quantidade, produto e número conferem');
+
+  // A chave voltou e confere: o pedido de compra cumpriu o papel dele.
+  documentos.fechar(leadId, 'PC', 'chave recebida do fornecedor e conferida');
+
+  // Etapa 7: a entrega. O e-mail com chave + book é para o CLIENTE — não sai sem a caixa
+  // @vendas existir. Sem entrega confirmada, o PV continua aberto, que é a regra.
+  const entrega = { assunto: `Sua licença — pedido ${docnum.formatar('PV', lead.doc_seq, lead.doc_sku)}`, chave };
+  deps.log(leadId, null, 'email_rascunho', `Para o cliente — ${entrega.assunto}\n\nChave de licença registrada. Falta anexar o book de instalação e enviar pela caixa @vendas.`);
+  deps.notify('fluxo_entrega', `Pedido ${pc.codigo} conferido: chave pronta para ir ao cliente. Falta a caixa @vendas.`, leadId);
+
+  return { ok: true, chave, entrega, pvFechado: false };
+}
+
+/**
+ * A entrega saiu de verdade: registra e fecha o PV. É o único caminho que fecha o pedido,
+ * e exige a prova (chave + book) — pagar não é receber.
+ */
+function confirmarEntregaAoCliente(deps, leadId, prova) {
+  const r = documentos.fechar(leadId, 'PV', 'chave e book entregues ao cliente', prova);
+  if (!r.ok) return r;
+  registrar(deps, leadId, 'vendas_entrega', 'chave e book enviados');
+  deps.notify('pedido_entregue', `Pedido ${r.doc.codigo} entregue ao cliente — ciclo de venda fechado.`, leadId);
+  return r;
+}
+
+module.exports = { ETAPAS, etapa, ligado, registrar, conferir, textoPedidoDeCompra, aoConfirmarPagamento,
+  extrairChave, pareceFatura, aoReceberDoFornecedor, confirmarEntregaAoCliente };
