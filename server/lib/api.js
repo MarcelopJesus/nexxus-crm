@@ -8,6 +8,7 @@ const { sendEmail, isConfigured } = require('./mailer');
 const sdr = require('./sdr');
 const catalog = require('./catalogSync');
 const faq = require('./faq');
+const docnum = require('./docnum');
 const S = store; // alias
 
 const STAGES = [
@@ -21,6 +22,47 @@ const STAGES = [
 const AREAS = ['vendas','prevendas','compras','produto','marketing','financeiro','juridico','admin'];
 
 function log(leadId, userId, type, message){ S.insert('activities', { lead_id:leadId, user_id:userId||null, type, message }); }
+
+// O site pode mandar o código que ele mesmo gerou (campo doc/codigo/protocolo). Quando
+// vier um NXT reconhecível, o CRM adota o número em vez de abrir outro — senão o mesmo
+// pedido teria um número no site e outro aqui, que é exatamente o que a numeração veio
+// resolver. Vindo qualquer outra coisa, abre número novo.
+function seqDoIntake(body, cf) {
+  const candidatos = [body && body.doc, body && body.codigo, body && body.protocol,
+    cf && cf.doc, cf && cf.codigo, cf && cf.protocolo];
+  for (const c of candidatos) {
+    const achado = docnum.extrair(c);
+    if (!achado) continue;
+    // O intake é público (só protegido pela chave). Adotar um número que JÁ pertence a
+    // outro pedido deixaria dois leads com o mesmo código, e o e-mail do cliente cairia
+    // em qualquer um dos dois. Número já usado: ignora o que veio e abre um novo.
+    const jaExiste = S.findOne('leads', l => Number(l.doc_seq) === achado.seq);
+    if (jaExiste) break;
+    return docnum.reservarSeq(achado.seq) || docnum.proximoSeq();
+  }
+  return docnum.proximoSeq();
+}
+
+// Acha o lead dono de um código NXT citado num texto.
+//
+// Duas regras que não são óbvias:
+//  - Encaminhamento cita mais de um pedido ("segue o NXT-OP-0010 ... sobre o NXT-OP-0020").
+//    Pegar o primeiro é chute. Quando os códigos apontam para leads DIFERENTES, ninguém
+//    casa — cai no message-id/remetente, e no pior caso um humano decide.
+//  - Lead perdido não recebe e-mail por código: 'lost' é decisão tomada, e ressuscitar
+//    silenciosamente um negócio morto esconde o que está acontecendo. 'won' recebe, sim —
+//    é o pós-venda do pedido, que é justamente o que a numeração veio permitir.
+function leadPorCodigo(texto) {
+  const achados = docnum.extrairTodos(texto);
+  if (!achados.length) return null;
+  const ids = [];
+  for (const a of achados) {
+    const lead = S.findOne('leads', l => Number(l.doc_seq) === a.seq && l.status !== 'lost');
+    if (lead && !ids.includes(lead.id)) ids.push(lead.id);
+  }
+  if (ids.length !== 1) return null;
+  return ids[0];
+}
 function touchLead(id){ S.update('leads', id, { updated_at: S.now() }); }
 // A margem aceitável (M30) chegou depois: instalação antiga não tem o campo gravado.
 // Em vez de espalhar fallback por todo lado, ele é preenchido aqui, na única porta por
@@ -297,7 +339,13 @@ async function sendProposalEmail(o) {
   // que o vendedor escolheu vai no corpo, e a proposta nova viaja no mesmo e-mail. Tudo
   // passa por aqui de propósito: é o único caminho de envio de proposta, e é ele que
   // garante a regra do M27 (card só anda quando o e-mail sai).
-  const subject = o.subject || 'Sua proposta — NexxusCRM';
+  // O código do pedido vai no assunto de propósito: é ele que o cliente cita ao responder,
+  // e é por ele que a resposta encontra o card certo (ver a ordem de casamento em
+  // processarEmailRecebido). Sem isso a numeração existiria só dentro do CRM.
+  const cods = docnum.codigosDoLead(lead);
+  const marca = cods ? (lead && lead.status === 'won' ? cods.pv : cods.op) : null;
+  const subjectBase = o.subject || 'Sua proposta — NexxusCRM';
+  const subject = (marca && !docnum.extrair(subjectBase)) ? (subjectBase + ' [' + marca + ']') : subjectBase;
   const abertura = o.intro
     ? String(o.intro).split(/\n{2,}/).map(par => `<p>${escapeHtml(par).replace(/\n/g,'<br/>')}</p>`).join('')
     : `<h2 style="color:#0071E3">Proposta comercial — NexxusCRM</h2>`
@@ -442,6 +490,9 @@ function leadWithJoins(id) {
     owner_name: u ? u.name : null, product_name: p ? p.name : null,
     supplier_name: sup ? sup.name : null,
     contract_status: ctr ? ctr.status : null,
+    // Os códigos são derivados do sequencial na saída, nunca guardados prontos: assim OP,
+    // PV e PC não têm como divergir entre si nem ficar velhos quando o SKU muda.
+    doc: docnum.codigosDoLead(l),
   });
 }
 
@@ -634,9 +685,13 @@ async function processarEmailRecebido(body, req) {
     return { status:200, body:{ success:true, data:{ quarantined:true, reason:auth } } };
   }
 
-  // Threading: a resposta do cliente cita o message-id que mandamos. Casar por ele é
-  // exato — só cai no casamento por e-mail do remetente quando não vier referência.
-  let leadId = leadPorReferencia(d);
+  // Ordem de casamento, do mais explícito ao mais frouxo (decidido em 09/09):
+  //   1. código NXT citado no assunto ou no corpo — o cliente está dizendo de qual pedido fala
+  //   2. message-id que a Patrícia mandou (threading exato)
+  //   3. endereço do remetente — o frouxo, e a causa do defeito visto na reunião: três
+  //      oportunidades do mesmo cliente caíam todas no mesmo card
+  let leadId = leadPorCodigo(assunto) || leadPorCodigo(texto);
+  if (!leadId) leadId = leadPorReferencia(d);
   const ct = S.findOne('contacts', c => String(c.email||'').toLowerCase() === from.toLowerCase());
   if (!leadId && ct) {
     const abertos = S.find('leads', l => l.contact_id===ct.id && l.status==='open')
@@ -750,21 +805,33 @@ async function handle(req) {
 
     if (kind==='order') {
       const items = cf.itens || '';
+      // O pedido já nasce pago: o número serve de oportunidade E de pedido de venda, que
+      // é justamente a transição descrita na seção 11 do DECISOES.md — o PV nasce quando
+      // o dinheiro entra. Um site que já mandou o código reaproveita o dele.
+      const docSeq = seqDoIntake(body, cf);
+      const docSku = docnum.normalizaSku(prod ? prod.sku : (slug || null)) || null;
       const lead = S.insert('leads', { title: 'Pedido pago — '+companyName, account_id:acc.id, contact_id:ct.id, product_id: prod?prod.id:null,
         requested_software: items||message, source:'checkout', stage:'proposta_enviada', owner_id:owner, hot:0,
         status:'won', lost_reason:null, estimated_value: valueNum||null, qty:qtyNum, kind, preferred_channel:preferredChannel,
+        doc_seq: docSeq, doc_sku: docSku, doc_pago_em: S.now(),
         notes: 'Pedido pago via site'+(cf.pedido_id?(' (#'+cf.pedido_id+')'):'')+(items?('\nItens: '+items):''), updated_at:S.now() });
       log(lead.id, owner, 'close', 'Pedido pago no site — negócio GANHO'+(cf.pedido_id?(' (pedido #'+cf.pedido_id+')'):'')+'. Valor R$ '+valueNum.toLocaleString('pt-BR')+'.');
+      log(lead.id, owner, 'note', 'Documentos: '+docnum.formatar('OP',docSeq)+' → '+docnum.formatar('PV',docSeq,docSku)+' (pagamento confirmado no site).');
       notify('order_paid', `Pedido pago no site: ${companyName} — R$ ${valueNum.toLocaleString('pt-BR')}.`, lead.id);
       return { status:201, body:{ success:true, data:{ id:lead.id, owner_id:owner, kind:'order' } } };
     }
 
+    // Newsletter não é oportunidade comercial: não consome número. Todo o resto nasce
+    // com o código, porque é ele que vai viajar até o assunto do e-mail.
+    const docSeq = (kind==='newsletter') ? null : seqDoIntake(body, cf);
+    const docSku = (kind==='newsletter') ? null : (docnum.normalizaSku(prod ? prod.sku : (slug || null)) || null);
     const lead = S.insert('leads', { title: companyName+' — '+(kind==='newsletter'?'Newsletter':(message?String(message).slice(0,40):'Consulta do site')),
       account_id:acc.id, contact_id:ct.id, product_id: prod?prod.id:null, requested_software:message||(prod?prod.name:null),
       source:(kind==='newsletter'?'newsletter':'site'), stage:'novo_lead', owner_id:owner, hot:0, status:'open',
       lost_reason:null, estimated_value:null, qty:qtyNum, kind, preferred_channel:preferredChannel,
+      doc_seq: docSeq, doc_sku: docSku,
       notes:(message||'')+(protocol?('\nProtocolo site: '+protocol):''), updated_at:S.now() });
-    log(lead.id, owner, 'note', 'Lead capturado automaticamente do site'+(protocol?(' (protocolo '+protocol+')'):'')+'.');
+    log(lead.id, owner, 'note', 'Lead capturado automaticamente do site'+(docSeq?(' — '+docnum.formatar('OP',docSeq)):'')+(protocol?(' (protocolo '+protocol+')'):'')+'.');
     notify('lead_new', `Novo lead do site: ${companyName} — atribuído a ${ownerName||'—'}.`, lead.id);
     // O agente Nexus pega o lead novo na hora, sem esperar a varredura de 5 min. Assíncrono
     // de propósito: o site recebe o 201 na mesma velocidade de antes.
@@ -1685,5 +1752,5 @@ module.exports = { handle, log, notify, leadWithJoins, clientName, OPCOES_RECUSA
   abrirPendenciaDeEmail, limparPendenciaDeEmail, responderPendenciaDeEmail,
   logEmailIn, logEmailOut, anotarResumoEmail, SIGNATURE_TEXT, SIGNATURE_HTML,
   timestampRecente, assinaturaValida, extraiEmail, stripHtml,
-  respostaAutomatica, autenticacaoFalhou, leadPorReferencia, limiteDeCriacao, _resetLimiteCriacao,
+  respostaAutomatica, autenticacaoFalhou, leadPorReferencia, leadPorCodigo, limiteDeCriacao, _resetLimiteCriacao,
   reservarEvento, fecharEvento, liberarEvento };

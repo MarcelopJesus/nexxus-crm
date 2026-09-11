@@ -2,6 +2,18 @@
 // O modelo e o mailer são stubados por require.cache: nenhum teste toca rede.
 const { test, after, beforeEach } = require('node:test');
 const assert = require('node:assert/strict');
+
+// Espera uma condição virar verdadeira, checando de 5 em 5ms até o limite. Substitui a
+// espera fixa em testes de disparo assíncrono — prazo fixo vira teste instável assim que
+// a máquina fica mais ocupada.
+async function ateQue(cond, limiteMs = 2000) {
+  const fim = Date.now() + limiteMs;
+  while (Date.now() < fim) {
+    if (cond()) return true;
+    await new Promise(r => setTimeout(r, 5));
+  }
+  return cond();
+}
 const path = require('node:path');
 const fs = require('node:fs');
 
@@ -607,7 +619,9 @@ test('"parar" em NEGOCIAÇÃO pausa o lead, escala e notifica', async () => {
 
   const acionado = agent.reagirAEmail(lead.id);
   assert.equal(acionado, false, 'etapa sem máscara não gera resposta automática');
-  await new Promise(r => setTimeout(r, 30));   // o disparo é assíncrono
+  // Espera pela CONDIÇÃO, não por um tempo fixo: 30ms bastavam com a suíte de hoje, mas
+  // qualquer arquivo de teste a mais aumenta a concorrência e o prazo estoura sozinho.
+  await ateQue(() => store.get('leads', lead.id).agent_paused === 1);
 
   const d = store.get('leads', lead.id);
   assert.equal(d.agent_paused, 1, 'o cliente pediu para parar — o agente para');

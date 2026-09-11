@@ -166,6 +166,10 @@ function APP_TEMPLATE() { return `
                 <span v-if="l.email_pending_options && l.email_pending_options.length" title="Resposta de negociação aguardando você escolher">✉️</span></div>
               <div v-if="l.bant_score!=null" class="small" style="margin:2px 0"><span class="badge" :style="{background: tierColor(l.bant_tier), color:'#fff', fontSize:'10px'}">BANT {{ l.bant_score }} · {{ l.bant_tier }}</span></div>
               <div class="lc-acc">{{ l.account_name || '—' }}</div>
+              <!-- O código do pedido (09/09): é ele que viaja até o assunto do e-mail e
+                   faz a resposta do cliente voltar para ESTE card. Mostra PV depois do
+                   pagamento, OP antes. -->
+              <div v-if="l.doc" class="small" style="font-family:ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:.02em;color:var(--nx-text-mute);margin:2px 0 4px" :title="'Oportunidade ' + l.doc.op + (l.status==='won' ? (' · Pedido de venda ' + l.doc.pv) : '')">{{ l.status==='won' ? l.doc.pv : l.doc.op }}</div>
               <div class="lc-meta">
                 <span class="chip">{{ l.requested_software || l.product_name || 'Software' }}</span>
                 <span v-if="l.estimated_value" class="chip val">{{ BRL(l.estimated_value) }}</span>
