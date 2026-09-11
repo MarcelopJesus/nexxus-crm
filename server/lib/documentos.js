@@ -57,8 +57,15 @@ function abrir(leadId, tipo, extra) {
 
 // Fechar devolve o que aconteceu em vez de lançar: quem chama precisa saber se o pedido
 // ficou de pé porque uma regra barrou, e isso não é erro de programação — é o processo.
-function fechar(leadId, tipo, motivo) {
+// `entrega` só é exigida no PV: { chave, book } — a prova de que o cliente recebeu.
+// Um texto livre qualquer NÃO serve como prova; era assim antes e deixava fechar o PV
+// com "pagamento confirmado", o que marcaria como entregue um pedido sem chave nenhuma.
+function fechar(leadId, tipo, motivo, entrega) {
   const t = String(tipo).toUpperCase();
+  if (!TIPOS.includes(t)) return { ok: false, razao: 'tipo de documento inválido' };
+  // Documento órfão (lead apagado) não pode continuar mudando de estado em silêncio.
+  if (!store.get('leads', leadId)) return { ok: false, razao: 'lead inexistente' };
+
   const doc = achar(leadId, t);
   if (!doc) return { ok: false, razao: 'documento inexistente' };
   if (doc.status === FECHADO) return { ok: true, doc, jaEstava: true };
@@ -70,13 +77,19 @@ function fechar(leadId, tipo, motivo) {
     if (pc && pc.status !== FECHADO) {
       return { ok: false, razao: 'o pedido de compra ainda está aberto — a chave não voltou do fornecedor' };
     }
-    if (!motivo) {
-      return { ok: false, razao: 'o PV só fecha com a entrega registrada (chave + book enviados)' };
+    const e = entrega || {};
+    if (!String(e.chave || '').trim()) {
+      return { ok: false, razao: 'o PV só fecha com a chave de licença registrada' };
+    }
+    if (!e.book) {
+      return { ok: false, razao: 'o PV só fecha com o book de instalação enviado junto da chave' };
     }
   }
 
   const atualizado = store.update('documents', doc.id, {
     status: FECHADO, closed_at: store.now(), motivo: motivo || null,
+    // Guarda a PROVA, não a chave: o valor da licença não fica repetido no histórico.
+    entrega: t === 'PV' ? { chave_registrada: true, book: true, em: store.now() } : null,
   });
   return { ok: true, doc: atualizado };
 }

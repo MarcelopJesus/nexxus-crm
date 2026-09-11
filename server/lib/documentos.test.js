@@ -41,7 +41,7 @@ test('o PV NÃO fecha enquanto o pedido de compra estiver aberto', async () => {
   // É a chave voltando do fornecedor que destrava o ciclo de vendas.
   const id = await pedidoPago('Cliente Dois');
   docs.abrir(id, 'PC');
-  const r = docs.fechar(id, 'PV', 'chave e book enviados');
+  const r = docs.fechar(id, 'PV', 'chave e book enviados', { chave:'ABC-123', book:true });
   assert.equal(r.ok, false);
   assert.match(r.razao, /pedido de compra ainda está aberto/);
   assert.equal(docs.achar(id, 'PV').status, 'open');
@@ -51,7 +51,7 @@ test('o PC fecha antes; só então o PV pode fechar', async () => {
   const id = await pedidoPago('Cliente Tres');
   docs.abrir(id, 'PC');
   assert.equal(docs.fechar(id, 'PC', 'chave recebida da Ampler').ok, true);
-  const r = docs.fechar(id, 'PV', 'chave e book enviados ao cliente');
+  const r = docs.fechar(id, 'PV', 'chave e book enviados ao cliente', { chave:'ABC-123', book:true });
   assert.equal(r.ok, true);
   assert.equal(docs.achar(id, 'PV').status, 'close');
   assert.equal(docs.entregue(id), true);
@@ -64,9 +64,9 @@ test('o PV não fecha sem a entrega registrada, mesmo sem PC nenhum', async () =
   const lead = store.insert('leads', { title:'Sem PC', status:'won', stage:'proposta_enviada',
     doc_seq: docnum.proximoSeq(), doc_sku: null, qty:1 });
   docs.abrir(lead.id, 'PV');
-  const r = docs.fechar(lead.id, 'PV', null);
+  const r = docs.fechar(lead.id, 'PV', null, null);
   assert.equal(r.ok, false);
-  assert.match(r.razao, /entrega registrada/);
+  assert.match(r.razao, /chave de licença registrada/);
   assert.equal(docs.entregue(lead.id), false);
 });
 

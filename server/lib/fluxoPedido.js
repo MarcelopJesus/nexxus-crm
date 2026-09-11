@@ -61,8 +61,11 @@ function conferir(lead, recebido) {
   if (veio.seq != null && Number(veio.seq) !== pedido.seq) {
     problemas.push(`número do pedido: nosso é ${pedido.seq}, veio ${veio.seq}`);
   }
-  if (veio.chave != null && !String(veio.chave).trim()) {
-    problemas.push('a chave veio vazia');
+  // A chave é o objeto da compra: sem ela não há o que entregar. Ausente conta como
+  // divergência, não como "o fornecedor não informou" — deixar passar aqui seria entregar
+  // ao cliente um e-mail sem licença, o pior erro possível neste fluxo.
+  if (!String(veio.chave == null ? '' : veio.chave).trim()) {
+    problemas.push('não veio chave de licença');
   }
   return { ok: problemas.length === 0, problemas };
 }
@@ -101,8 +104,21 @@ function textoPedidoDeCompra(lead, produto, fornecedor) {
 // `deps` recebe log e notify de fora em vez de importar api.js — api.js já importa este
 // módulo, e o ciclo entre os dois deixaria um dos lados com metade das funções vazia.
 function aoConfirmarPagamento(deps, leadId) {
+  // Dependências conferidas na porta: sem isto um chamador esquecido abriria PV e PC e
+  // só quebraria no notify, deixando o pedido metade processado em produção.
+  if (!deps || typeof deps.log !== 'function' || typeof deps.notify !== 'function') {
+    throw new Error('aoConfirmarPagamento exige deps.log e deps.notify');
+  }
   const lead = store.get('leads', leadId);
   if (!lead) return { ok: false, razao: 'lead inexistente' };
+
+  // O webhook do Stripe repete. Abrir PV/PC já era idempotente, mas os RASCUNHOS e as
+  // NOTIFICAÇÕES não eram: rodar duas vezes enchia a caixa de avisos do mesmo pedido.
+  const jaRodou = store.findOne('activities', a => a.lead_id === Number(leadId)
+    && a.type === 'fluxo' && String(a.message || '').includes('Pagamento confirmado'));
+  if (jaRodou) {
+    return { ok: true, repetido: true, pv: documentos.achar(leadId, 'PV'), pc: documentos.achar(leadId, 'PC') };
+  }
 
   const pv = documentos.abrir(leadId, 'PV');
   registrar(deps, leadId, 'pagamento_ok', pv.codigo);
@@ -115,7 +131,13 @@ function aoConfirmarPagamento(deps, leadId) {
   const email = textoPedidoDeCompra(lead, produto, fornecedor);
 
   if (ligado()) {
-    registrar(deps, leadId, 'compras_pede', pc.codigo);
+    // ⚠️ O envio real ao fornecedor AINDA NÃO EXISTE: depende da caixa @compras, que é
+    // tarefa do Marcelo (fase 4 do plano). Ligar o freio hoje libera o fluxo, mas o
+    // e-mail continua saindo como rascunho — e o texto abaixo diz isso em vez de mentir
+    // "enviado", que faria alguém parar de cobrar o fornecedor achando que já pediu.
+    registrar(deps, leadId, 'compras_pede', `${pc.codigo} — PRONTO PARA ENVIO (a caixa @compras ainda não existe)`);
+    deps.log(leadId, null, 'email_rascunho', `Para o fornecedor${fornecedor ? ' (' + fornecedor.name + ')' : ''} — ${email.assunto}\n\n${email.corpo}`);
+    deps.notify('fluxo_rascunho', `Pedido de compra ${pc.codigo} pronto para envio — falta a caixa @compras.`, leadId);
   } else {
     // Fail-closed: sem o freio ligado o pedido de compra fica escrito e visível, esperando
     // um humano. É melhor o pedido parar aqui do que sair sozinho para o fornecedor.
@@ -124,7 +146,9 @@ function aoConfirmarPagamento(deps, leadId) {
     deps.notify('fluxo_rascunho', `Pedido de compra ${pc.codigo} pronto para revisão — nada foi enviado ao fornecedor.`, leadId);
   }
 
-  return { ok: true, pv, pc, email, enviado: ligado() };
+  // `enviado` é sempre false até a caixa @compras existir. O campo continua aqui para
+  // quem chama saber que NADA saiu — não é o mesmo que o freio estar ligado.
+  return { ok: true, pv, pc, email, enviado: false, liberado: ligado() };
 }
 
 module.exports = { ETAPAS, etapa, ligado, registrar, conferir, textoPedidoDeCompra, aoConfirmarPagamento };

@@ -86,10 +86,19 @@ test('chave vazia é divergência, não entrega', () => {
   const lead = { qty: 1, doc_sku: null, doc_seq: 5 };
   const r = fluxo.conferir(lead, { chave: '   ' });
   assert.equal(r.ok, false);
-  assert.match(r.problemas.join(' '), /chave veio vazia/);
+  assert.match(r.problemas.join(' '), /não veio chave/);
 });
 
-test('o que o fornecedor não informou não vira divergência inventada', () => {
+test('resposta SEM chave nenhuma não passa — era falso ok', () => {
+  // Achado do Codex: {qty, sku, seq} batendo e chave ausente devolvia ok. Entregaria ao
+  // cliente um e-mail sem licença dentro, que é o pior erro possível neste fluxo.
+  const lead = { qty: 3, doc_sku: 'AMPLER', doc_seq: 12 };
+  assert.equal(fluxo.conferir(lead, { qty: 3, sku: 'AMPLER', seq: 12 }).ok, false);
+  assert.equal(fluxo.conferir(lead, {}).ok, false);
+  assert.equal(fluxo.conferir(lead, null).ok, false);
+});
+
+test('o que o fornecedor não informou além da chave não vira divergência inventada', () => {
   // Fornecedor que responde só com a chave não pode ser tratado como erro.
   const lead = { qty: 3, doc_sku: 'AMPLER', doc_seq: 12 };
   assert.equal(fluxo.conferir(lead, { chave: 'ABC-123' }).ok, true);
@@ -115,4 +124,39 @@ test('o código do e-mail é o mesmo número do pedido, com prefixo de compra', 
   const e = fluxo.textoPedidoDeCompra(lead, null, null);
   assert.equal(e.codigo, docnum.formatar('PC', lead.doc_seq, lead.doc_sku));
   assert.equal(docnum.extrair(e.codigo).seq, lead.doc_seq);
+});
+
+// ---- achados da revisão do Codex sobre a fase 2 ----
+
+test('rodar o fluxo duas vezes não duplica rascunho nem notificação', async () => {
+  // O webhook do Stripe repete. Abrir PV/PC já era idempotente; os efeitos colaterais não.
+  const id = await pedidoPago('Webhook Repetido');
+  const r = fluxo.aoConfirmarPagamento({ log: api.log, notify: api.notify }, id);
+  assert.equal(r.repetido, true);
+  assert.equal(store.find('activities', a => a.lead_id === id && a.type === 'email_rascunho').length, 1);
+  assert.equal(store.find('notifications', n => n.lead_id === id && n.type === 'fluxo_rascunho').length, 1);
+});
+
+test('chamador sem deps completo é recusado na porta, antes de abrir documento', () => {
+  const lead = store.insert('leads', { title:'Deps incompleto', status:'won', doc_seq: docnum.proximoSeq(), qty:1 });
+  assert.throws(() => fluxo.aoConfirmarPagamento({ log: api.log }, lead.id), /exige deps.log e deps.notify/);
+  assert.equal(docs.achar(lead.id, 'PV'), null, 'não pode abrir documento e quebrar depois');
+});
+
+test('o fluxo nunca afirma que enviou — a caixa @compras ainda não existe', async () => {
+  const lead = store.insert('leads', { title:'Nao Mente', status:'won', doc_seq: docnum.proximoSeq(), qty:1 });
+  const r = fluxo.aoConfirmarPagamento({ log: api.log, notify: api.notify }, lead.id);
+  assert.equal(r.enviado, false, 'dizer enviado sem enviar faria alguém parar de cobrar o fornecedor');
+});
+
+test('webhook de pagamento repetido com o mesmo protocolo não cria segundo pedido', async () => {
+  const corpo = { contactName:'Stripe Repetiu', email:'repetiu@cli.com', value:100, protocol:'stripe_evt_777',
+    customFields:{ origem:'nexxustech.ia.br/checkout', nome:'Stripe Repetiu' } };
+  const a = await intake(corpo);
+  const b = await intake(corpo);
+  assert.equal(b.body.data.id, a.body.data.id, 'o segundo evento tem que cair no mesmo lead');
+  assert.equal(b.body.data.deduplicated, true);
+  const id = a.body.data.id;
+  assert.equal(store.find('documents', d => d.lead_id === id && d.tipo === 'PV').length, 1);
+  assert.equal(store.find('notifications', n => n.lead_id === id && n.type === 'order_paid').length, 1);
 });
