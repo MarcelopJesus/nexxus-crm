@@ -12,7 +12,7 @@ const DB_FILE = process.env.DB_FILE || path.join(DATA_DIR, 'nexxus.json');
 const COLLECTIONS = ['users','accounts','contacts','suppliers','products','leads',
   'quotes','pricings','proposals','tasks','contracts','activities','notifications',
   'prospects','outreaches','qualifications','webhook_events','faq_entries',
-  'chat_sessions'];
+  'chat_sessions','documents'];
 
 let data = { seq: {}, config: null };
 COLLECTIONS.forEach(c => data[c] = []);
