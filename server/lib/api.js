@@ -10,6 +10,7 @@ const catalog = require('./catalogSync');
 const faq = require('./faq');
 const docnum = require('./docnum');
 const documentos = require('./documentos');
+const fluxo = require('./fluxoPedido');
 const S = store; // alias
 
 const STAGES = [
@@ -818,10 +819,11 @@ async function handle(req) {
         doc_seq: docSeq, doc_sku: docSku, doc_pago_em: S.now(),
         notes: 'Pedido pago via site'+(cf.pedido_id?(' (#'+cf.pedido_id+')'):'')+(items?('\nItens: '+items):''), updated_at:S.now() });
       log(lead.id, owner, 'close', 'Pedido pago no site — negócio GANHO'+(cf.pedido_id?(' (pedido #'+cf.pedido_id+')'):'')+'. Valor R$ '+valueNum.toLocaleString('pt-BR')+'.');
-      // O PV nasce aqui: o dinheiro entrou. Ele fica ABERTO até a chave chegar ao cliente
-      // — pedido pago não é pedido entregue, que é a regra central do desenho de 09/09.
-      const pv = documentos.abrir(lead.id, 'PV');
-      log(lead.id, owner, 'doc', 'Pedido de venda '+pv.codigo+' aberto — pagamento confirmado. Fecha quando a chave e o book forem enviados ao cliente.');
+      // O fluxo das 7 etapas começa aqui: abre o PV, registra a timeline e deixa o pedido
+      // de compra pronto. Com FLUXO_POS_PAGAMENTO desligado (o padrão) nada sai para fora —
+      // o e-mail ao fornecedor fica como rascunho esperando um humano.
+      const andamento = fluxo.aoConfirmarPagamento({ log, notify }, lead.id);
+      log(lead.id, owner, 'doc', 'Pedido de venda '+andamento.pv.codigo+' aberto — pagamento confirmado. Fecha quando a chave e o book forem enviados ao cliente.');
       notify('order_paid', `Pedido pago no site: ${companyName} — R$ ${valueNum.toLocaleString('pt-BR')}.`, lead.id);
       return { status:201, body:{ success:true, data:{ id:lead.id, owner_id:owner, kind:'order' } } };
     }

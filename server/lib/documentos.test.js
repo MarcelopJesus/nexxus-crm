@@ -13,6 +13,7 @@ process.env.INTAKE_KEY = 'chave-de-teste';
 const store = require('./store');
 const { seedIfEmpty } = require('./seed');
 const docs = require('./documentos');
+const docnum = require('./docnum');
 const api = require('./api');
 const { handle } = api;
 
@@ -58,11 +59,23 @@ test('o PC fecha antes; só então o PV pode fechar', async () => {
 
 test('o PV não fecha sem a entrega registrada, mesmo sem PC nenhum', async () => {
   // Fechar "no silêncio" faria um pedido aparecer concluído com o cliente sem a chave.
-  const id = await pedidoPago('Cliente Quatro');
-  const r = docs.fechar(id, 'PV', null);
+  // Cenário montado à mão: pelo intake o PC hoje já nasce junto (o fluxo das 7 etapas),
+  // então a única forma de exercitar ESTA regra é um pedido sem pedido de compra.
+  const lead = store.insert('leads', { title:'Sem PC', status:'won', stage:'proposta_enviada',
+    doc_seq: docnum.proximoSeq(), doc_sku: null, qty:1 });
+  docs.abrir(lead.id, 'PV');
+  const r = docs.fechar(lead.id, 'PV', null);
   assert.equal(r.ok, false);
   assert.match(r.razao, /entrega registrada/);
-  assert.equal(docs.entregue(id), false);
+  assert.equal(docs.entregue(lead.id), false);
+});
+
+test('o pagamento abre PV e PC juntos — compras já tem trabalho na mão', async () => {
+  // Etapas 1 a 4 do fluxo de 09/09 acontecem na confirmação do pagamento.
+  const id = await pedidoPago('Cliente Quatro');
+  assert.equal(docs.achar(id, 'PV').status, 'open');
+  assert.ok(docs.achar(id, 'PC'), 'o pedido de compra nasce junto');
+  assert.equal(docs.achar(id, 'PC').status, 'open');
 });
 
 test('abrir o mesmo documento duas vezes não cria dois', async () => {

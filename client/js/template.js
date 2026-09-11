@@ -175,6 +175,16 @@ function APP_TEMPLATE() { return `
                 <span v-if="l.estimated_value" class="chip val">{{ BRL(l.estimated_value) }}</span>
                 <span class="chip">Qtd {{ l.qty }}</span>
               </div>
+              <!-- Os documentos do pedido com o verde/vermelho pedido em 09/09: verde = ainda
+                   aberto (alguém tem trabalho a fazer), cinza = fechado. O PV aberto num
+                   pedido já pago é o sinal de que o cliente AINDA não recebeu a chave. -->
+              <div v-if="l.documentos && l.documentos.length" class="lc-meta" style="margin-top:4px">
+                <span v-for="d in l.documentos" :key="d.tipo" class="chip"
+                  :style="{background: d.aberto ? '#e8f7ee' : 'transparent', color: d.aberto ? '#116b3a' : 'var(--nx-text-mute)', borderColor: d.aberto ? '#9bd9b5' : 'var(--nx-border)', fontWeight: d.aberto ? 700 : 500}"
+                  :title="d.codigo + (d.aberto ? ' — em aberto' : (' — fechado' + (d.motivo ? (': ' + d.motivo) : '')))">
+                  <span :style="{display:'inline-block',width:'6px',height:'6px',borderRadius:'50%',marginRight:'5px',background: d.aberto ? '#1db954' : '#c9ccd6'}"></span>{{ d.tipo }}
+                </span>
+              </div>
               <!-- Ganho ainda não é ganho enquanto o trâmite não fecha (seção 9). -->
               <div v-if="tramiteDoLead(l)" class="small" :style="{color: tramiteDoLead(l).cor, fontWeight:600, marginTop:'4px'}">{{ tramiteDoLead(l).txt }}</div>
               <div v-if="l.status==='lost' && l.lost_reason" class="small muted" style="margin-top:4px">{{ l.lost_reason }}</div>
