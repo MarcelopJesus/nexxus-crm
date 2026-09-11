@@ -473,6 +473,9 @@ function leadWithJoins(id) {
     owner_name: u ? u.name : null, product_name: p ? p.name : null,
     supplier_name: sup ? sup.name : null,
     contract_status: ctr ? ctr.status : null,
+    // Os códigos são derivados do sequencial na saída, nunca guardados prontos: assim OP,
+    // PV e PC não têm como divergir entre si nem ficar velhos quando o SKU muda.
+    doc: docnum.codigosDoLead(l),
   });
 }
 

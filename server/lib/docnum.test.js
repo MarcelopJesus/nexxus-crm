@@ -143,3 +143,15 @@ test('newsletter não consome número de oportunidade', async () => {
   const lead = store.get('leads', r.body.data.id);
   assert.equal(lead.doc_seq, null, 'inscrito em newsletter não é oportunidade comercial');
 });
+
+test('a API devolve os códigos junto do lead, para a tela poder mostrar', async () => {
+  const r = await intake({ companyName:'Mostra Na Tela Ltda', contactName:'D', email:'d@mostra.com',
+    productSlug:'ampler', quantity:5 });
+  const admin = store.findOne('users', u => u.active);
+  const lista = await handle({ method:'GET', path:'/api/leads', user:admin });
+  const naLista = lista.body.data.find(l => l.id === r.body.data.id);
+  assert.ok(naLista.doc, 'o lead vai para a tela com os códigos calculados');
+  assert.match(naLista.doc.op, /^NXT-OP-\d{4}$/);
+  // derivados na saída, nunca gravados prontos: OP e PV não podem divergir
+  assert.equal(naLista.doc.seq, store.get('leads', r.body.data.id).doc_seq);
+});
