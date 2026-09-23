@@ -189,4 +189,5 @@ async function sendEmail({ to, subject, html, headers, replyTo, area }) {
 
 function _zerarTokenGraph() { tokenGraph = null; }   // só para os testes
 
-module.exports = { sendEmail, isConfigured, remetenteDe, caixasConfiguradas, CAIXAS, HEADERS_AUTOMATICO, _zerarTokenGraph };
+module.exports = { sendEmail, isConfigured, remetenteDe, caixasConfiguradas, CAIXAS, HEADERS_AUTOMATICO,
+  provedor, credenciaisGraph, obterTokenGraph, _zerarTokenGraph };
