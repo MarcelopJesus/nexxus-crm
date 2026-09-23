@@ -696,13 +696,15 @@ function receberChatDoSite(body) {
 
 // Processamento do e-mail recebido, separado da rota para caber num try/catch: se algo
 // aqui estourar, o evento Svix volta a ficar livre e a retentativa do Resend funciona.
-async function processarEmailRecebido(body, req) {
+// opts.caixaPropria: veio da varredura das caixas do Outlook (caixaOutlook.js) — o CRM leu
+// a própria caixa do agente, então o filtro de destinatário do Resend não se aplica.
+async function processarEmailRecebido(body, req, opts = {}) {
   const d = (body && body.data) || {};
   // Só evento de e-mail recebido, e só no endereço da Patrícia. Outro tipo de evento
   // (entregue, bounce) ou outro destinatário não é conversa com cliente.
   if (String(body.type||'') !== 'email.received')
     return ignorado('evento '+(body.type||'sem tipo')+' não é email.received');
-  if (!enderecoDaPatricia(d.to))
+  if (!opts.caixaPropria && !enderecoDaPatricia(d.to))
     return ignorado('destinatário fora de EMAIL_INBOUND_ADDRESS');
 
   const from = extraiEmail(d.from);
@@ -1829,4 +1831,4 @@ module.exports = { handle, log, notify, leadWithJoins, clientName, OPCOES_RECUSA
   logEmailIn, logEmailOut, anotarResumoEmail, SIGNATURE_TEXT, SIGNATURE_HTML,
   timestampRecente, assinaturaValida, extraiEmail, stripHtml,
   respostaAutomatica, autenticacaoFalhou, leadPorReferencia, leadPorCodigo, limiteDeCriacao, _resetLimiteCriacao,
-  reservarEvento, fecharEvento, liberarEvento };
+  reservarEvento, fecharEvento, liberarEvento, processarEmailRecebido };

@@ -10,6 +10,8 @@ const { handle } = require('./lib/api');
 const catalog = require('./lib/catalogSync');
 const { runFollowupSweep, autoLostDays } = require('./lib/followups');
 const agent = require('./lib/agentNexus');
+const caixaOutlook = require('./lib/caixaOutlook');
+const apiModulo = require('./lib/api');
 
 const PORT = process.env.PORT || 3001;
 const CLIENT_DIR = path.join(__dirname, '..', 'client');
@@ -153,6 +155,20 @@ function agenteSeguro() {
     .catch(e => console.error('[agente] varredura falhou:', e.message));
 }
 
+// Caixas do Outlook: com EMAIL_PROVIDER=graph a resposta do cliente cai na caixa do agente,
+// e é esta varredura que a traz para o CRM. Uma volta por vez — se a Microsoft demorar,
+// a próxima espera em vez de empilhar.
+const OUTLOOK_MS = 60 * 1000;
+let outlookRodando = false;
+function outlookSeguro() {
+  if (outlookRodando) return;
+  outlookRodando = true;
+  caixaOutlook.varrer(apiModulo)
+    .then(r => { if (r.processadas || r.erros) console.log(`[outlook] ${r.processadas} e-mail(s) novos, ${r.erros} erro(s)`); })
+    .catch(e => console.error('[outlook] varredura falhou:', e.message))
+    .finally(() => { outlookRodando = false; });
+}
+
 const HOST = process.env.HOST || '0.0.0.0';
 ready.then(() => server.listen(PORT, HOST, () => {
   console.log(`\n  Nexxus CRM rodando em http://localhost:${PORT}`);
@@ -166,6 +182,14 @@ ready.then(() => server.listen(PORT, HOST, () => {
   console.log(`[followup] varredura ativa — lead sem resposta vira perdido em ${autoLostDays()} dias`);
   varreduraSegura();
   setInterval(varreduraSegura, SWEEP_MS).unref();
+  const semOutlook = caixaOutlook.motivoDesligado();
+  if (semOutlook) {
+    console.log(`[outlook] leitura das caixas desligada — ${semOutlook}`);
+  } else {
+    console.log(`[outlook] lendo ${caixaOutlook.caixas().join(', ')} a cada minuto`);
+    outlookSeguro();
+    setInterval(outlookSeguro, OUTLOOK_MS).unref();
+  }
   const off = agent.motivoDesligado();
   if (off) {
     console.log(`[agente] piloto automático DESLIGADO — ${off}. Para ligar: AGENT_AUTOPILOT=on`);
