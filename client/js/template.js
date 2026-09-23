@@ -179,10 +179,10 @@ function APP_TEMPLATE() { return `
                    aberto (alguém tem trabalho a fazer), cinza = fechado. O PV aberto num
                    pedido já pago é o sinal de que o cliente AINDA não recebeu a chave. -->
               <div v-if="l.documentos && l.documentos.length" class="lc-meta" style="margin-top:4px">
-                <span v-for="d in l.documentos" :key="d.tipo" class="chip"
+                <span v-for="d in l.documentos" :key="d.codigo" class="chip"
                   :style="{background: d.aberto ? '#e8f7ee' : 'transparent', color: d.aberto ? '#116b3a' : 'var(--nx-text-mute)', borderColor: d.aberto ? '#9bd9b5' : 'var(--nx-border)', fontWeight: d.aberto ? 700 : 500}"
                   :title="d.codigo + (d.aberto ? ' — em aberto' : (' — fechado' + (d.motivo ? (': ' + d.motivo) : '')))">
-                  <span :style="{display:'inline-block',width:'6px',height:'6px',borderRadius:'50%',marginRight:'5px',background: d.aberto ? '#1db954' : '#c9ccd6'}"></span>{{ d.tipo }}
+                  <span :style="{display:'inline-block',width:'6px',height:'6px',borderRadius:'50%',marginRight:'5px',background: d.aberto ? '#1db954' : '#c9ccd6'}"></span>{{ d.tipo }}<template v-if="d.sku"> {{ d.sku }}</template>
                 </span>
               </div>
               <!-- Ganho ainda não é ganho enquanto o trâmite não fecha (seção 9). -->
