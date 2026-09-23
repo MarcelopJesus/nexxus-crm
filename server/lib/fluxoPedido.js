@@ -46,11 +46,42 @@ function registrar(deps, leadId, etapaId, detalhe) {
   return e;
 }
 
+// Os produtos do pedido. Carrinho com dois produtos = um OP e dois PV (09/09): o lead é a
+// oportunidade, e cada item ganha o próprio PV e o próprio PC, com o SKU no sufixo.
+// Lead antigo (ou pedido de um produto só sem a lista) vira um item só, montado dos campos
+// do próprio lead — é o comportamento de antes, intacto.
+function itensDoLead(lead) {
+  if (!lead) return [];
+  if (Array.isArray(lead.itens) && lead.itens.length) {
+    return lead.itens.map(i => ({
+      sku: docnum.normalizaSku(i.sku) || null,
+      product_id: i.product_id || null,
+      qty: Number(i.qty || 1),
+      nome: i.nome || null,
+    }));
+  }
+  return [{ sku: lead.doc_sku || null, product_id: lead.product_id || null,
+    qty: Number(lead.qty || 1), nome: lead.requested_software || null }];
+}
+
+function itemPorSku(lead, sku) {
+  const s = docnum.normalizaSku(sku) || null;
+  return itensDoLead(lead).find(i => i.sku === s) || null;
+}
+
+function produtoEFornecedor(item) {
+  const produto = item && item.product_id ? store.get('products', item.product_id) : null;
+  const fornecedor = produto && produto.supplier_id ? store.get('suppliers', produto.supplier_id) : null;
+  return { produto, fornecedor };
+}
+
 // Etapa 6: o double-check. É a razão de o compras não falar direto com o cliente.
 // Divergência NÃO entrega e NÃO fecha nada: para e chama gente.
-function conferir(lead, recebido) {
+// `item` é o produto do carrinho que está sendo conferido; omitido, vale o do lead.
+function conferir(lead, recebido, item) {
   const problemas = [];
-  const pedido = { qty: Number(lead.qty || 0), produto: lead.doc_sku || null, seq: Number(lead.doc_seq || 0) };
+  const it = item || itensDoLead(lead)[0] || {};
+  const pedido = { qty: Number(it.qty || 0), produto: it.sku || null, seq: Number(lead.doc_seq || 0) };
   const veio = recebido || {};
   if (veio.qty != null && Number(veio.qty) !== pedido.qty) {
     problemas.push(`quantidade: pedimos ${pedido.qty}, veio ${veio.qty}`);
@@ -72,11 +103,12 @@ function conferir(lead, recebido) {
 
 // O e-mail que compras manda ao fornecedor (pendência M40). Texto, não envio: quem envia
 // é a etapa 4, e só com o freio ligado.
-function textoPedidoDeCompra(lead, produto, fornecedor) {
-  const cods = docnum.codigosDoLead(lead);
-  const pc = cods ? cods.pc : '(sem número)';
-  const nomeProduto = (produto && produto.name) || lead.requested_software || 'licença';
-  const qtd = Number(lead.qty || 1);
+function textoPedidoDeCompra(lead, produto, fornecedor, item) {
+  const it = item || itensDoLead(lead)[0] || {};
+  const seq = Number(lead && lead.doc_seq);
+  const pc = Number.isInteger(seq) && seq > 0 ? docnum.formatar('PC', seq, it.sku) : '(sem número)';
+  const nomeProduto = (produto && produto.name) || it.nome || lead.requested_software || 'licença';
+  const qtd = Number(it.qty || 1);
   const assunto = `Pedido de compra ${pc} — ${qtd} licença(s) de ${nomeProduto}`;
   const corpo = [
     `Olá${fornecedor && fornecedor.name ? ', ' + fornecedor.name : ''},`,
@@ -117,38 +149,53 @@ function aoConfirmarPagamento(deps, leadId) {
   const jaRodou = store.findOne('activities', a => a.lead_id === Number(leadId)
     && a.type === 'fluxo' && String(a.message || '').includes('Pagamento confirmado'));
   if (jaRodou) {
-    return { ok: true, repetido: true, pv: documentos.achar(leadId, 'PV'), pc: documentos.achar(leadId, 'PC') };
+    return { ok: true, repetido: true, pv: documentos.achar(leadId, 'PV'), pc: documentos.achar(leadId, 'PC'),
+      pvs: documentos.doTipo(leadId, 'PV'), pcs: documentos.doTipo(leadId, 'PC') };
   }
 
-  const pv = documentos.abrir(leadId, 'PV');
-  registrar(deps, leadId, 'pagamento_ok', pv.codigo);
+  // Um PV por produto, todos no mesmo instante: o dinheiro entrou pelo carrinho inteiro.
+  const itens = itensDoLead(lead);
+  const pvs = itens.map(it => documentos.abrir(leadId, 'PV', null, it.sku));
+  registrar(deps, leadId, 'pagamento_ok', pvs.map(d => d.codigo).join(', '));
   registrar(deps, leadId, 'vendas_avisa', ligado() ? null : 'rascunho — aguardando liberação do fluxo');
   registrar(deps, leadId, 'vendas_compras');
 
-  const pc = documentos.abrir(leadId, 'PC');
-  const produto = lead.product_id ? store.get('products', lead.product_id) : null;
-  const fornecedor = produto && produto.supplier_id ? store.get('suppliers', produto.supplier_id) : null;
-  const email = textoPedidoDeCompra(lead, produto, fornecedor);
+  // Um PC por produto: cada um pode ir para um fornecedor diferente, e a resposta de cada
+  // fornecedor fecha só o PC dele (é pelo código com o SKU que ela é casada na volta).
+  const pcs = [];
+  const emails = [];
+  for (const it of itens) {
+    const pc = documentos.abrir(leadId, 'PC', null, it.sku);
+    const { produto, fornecedor } = produtoEFornecedor(it);
+    const email = textoPedidoDeCompra(lead, produto, fornecedor, it);
+    const para = `Para o fornecedor${fornecedor ? ' (' + fornecedor.name + ')' : ''} — ${email.assunto}\n\n${email.corpo}`;
+    // Sem fornecedor cadastrado a resposta dele nunca será aceita (remetenteEhDoFornecedor
+    // é fail-closed). Melhor avisar agora do que descobrir quando a chave não andar.
+    const semFornecedor = fornecedor ? '' : ' ATENÇÃO: produto sem fornecedor cadastrado — cadastre antes de enviar, senão a resposta não será reconhecida.';
 
-  if (ligado()) {
-    // ⚠️ O envio real ao fornecedor AINDA NÃO EXISTE: depende da caixa @compras, que é
-    // tarefa do Marcelo (fase 4 do plano). Ligar o freio hoje libera o fluxo, mas o
-    // e-mail continua saindo como rascunho — e o texto abaixo diz isso em vez de mentir
-    // "enviado", que faria alguém parar de cobrar o fornecedor achando que já pediu.
-    registrar(deps, leadId, 'compras_pede', `${pc.codigo} — PRONTO PARA ENVIO (a caixa @compras ainda não existe)`);
-    deps.log(leadId, null, 'email_rascunho', `Para o fornecedor${fornecedor ? ' (' + fornecedor.name + ')' : ''} — ${email.assunto}\n\n${email.corpo}`);
-    deps.notify('fluxo_rascunho', `Pedido de compra ${pc.codigo} pronto para envio — falta a caixa @compras.`, leadId);
-  } else {
-    // Fail-closed: sem o freio ligado o pedido de compra fica escrito e visível, esperando
-    // um humano. É melhor o pedido parar aqui do que sair sozinho para o fornecedor.
-    registrar(deps, leadId, 'compras_pede', `${pc.codigo} — RASCUNHO, não enviado (FLUXO_POS_PAGAMENTO desligado)`);
-    deps.log(leadId, null, 'email_rascunho', `Para o fornecedor${fornecedor ? ' (' + fornecedor.name + ')' : ''} — ${email.assunto}\n\n${email.corpo}`);
-    deps.notify('fluxo_rascunho', `Pedido de compra ${pc.codigo} pronto para revisão — nada foi enviado ao fornecedor.`, leadId);
+    if (ligado()) {
+      // ⚠️ O envio real ao fornecedor AINDA NÃO EXISTE: depende da caixa @compras, que é
+      // tarefa do Marcelo (fase 4 do plano). Ligar o freio hoje libera o fluxo, mas o
+      // e-mail continua saindo como rascunho — e o texto abaixo diz isso em vez de mentir
+      // "enviado", que faria alguém parar de cobrar o fornecedor achando que já pediu.
+      registrar(deps, leadId, 'compras_pede', `${pc.codigo} — PRONTO PARA ENVIO (a caixa @compras ainda não existe)`);
+      deps.log(leadId, null, 'email_rascunho', para);
+      deps.notify('fluxo_rascunho', `Pedido de compra ${pc.codigo} pronto para envio — falta a caixa @compras.${semFornecedor}`, leadId);
+    } else {
+      // Fail-closed: sem o freio ligado o pedido de compra fica escrito e visível, esperando
+      // um humano. É melhor o pedido parar aqui do que sair sozinho para o fornecedor.
+      registrar(deps, leadId, 'compras_pede', `${pc.codigo} — RASCUNHO, não enviado (FLUXO_POS_PAGAMENTO desligado)`);
+      deps.log(leadId, null, 'email_rascunho', para);
+      deps.notify('fluxo_rascunho', `Pedido de compra ${pc.codigo} pronto para revisão — nada foi enviado ao fornecedor.${semFornecedor}`, leadId);
+    }
+    pcs.push(pc);
+    emails.push(email);
   }
 
   // `enviado` é sempre false até a caixa @compras existir. O campo continua aqui para
   // quem chama saber que NADA saiu — não é o mesmo que o freio estar ligado.
-  return { ok: true, pv, pc, email, enviado: false, liberado: ligado() };
+  // `pv`/`pc`/`email` (o primeiro) ficam por compatibilidade com o pedido de um produto só.
+  return { ok: true, pv: pvs[0], pc: pcs[0], email: emails[0], pvs, pcs, emails, enviado: false, liberado: ligado() };
 }
 
 
@@ -206,6 +253,9 @@ function candidatosDeChave(texto) {
         }
         continue;
       }
+      // Um código nosso (NXT-PC-0042-AMPLER) logo abaixo da chave é CITAÇÃO do pedido, não
+      // continuação da chave — colado, virava "AAAA-1234NXT-PC-0042-AMPLER" e ia ao cliente.
+      if (docnum.extrair(limpoPedaco)) break;
       if (PEDACO_DE_CHAVE.test(limpoPedaco)) partes.push(limpoPedaco);
       else break;
     }
@@ -244,13 +294,13 @@ function pareceFatura(texto) {
  * Fail-closed: fornecedor sem e-mail/domínio cadastrado NÃO tem resposta aceita. Melhor o
  * e-mail cair no caminho normal (um humano lê) do que fechar pedido no escuro.
  */
-function remetenteEhDoFornecedor(lead, from) {
+function remetenteEhDoFornecedor(lead, from, item) {
   const remetente = String(from || '').trim().toLowerCase();
   if (!remetente.includes('@')) return { ok: false, razao: 'remetente inválido' };
   const dominio = remetente.split('@').pop();
 
-  const produto = lead && lead.product_id ? store.get('products', lead.product_id) : null;
-  const fornecedor = produto && produto.supplier_id ? store.get('suppliers', produto.supplier_id) : null;
+  // No carrinho com dois produtos, o fornecedor que vale é o do produto deste PC.
+  const { fornecedor } = produtoEFornecedor(item || itensDoLead(lead)[0]);
   if (!fornecedor) return { ok: false, razao: 'pedido sem fornecedor cadastrado' };
 
   const permitidos = []
@@ -268,6 +318,29 @@ function remetenteEhDoFornecedor(lead, from) {
   return bate ? { ok: true, fornecedor } : { ok: false, razao: `remetente ${remetente} não é do fornecedor ${fornecedor.name}` };
 }
 
+// Acha o PC aberto que um e-mail de fornecedor está respondendo.
+//   sku citado  → o PC aberto daquele produto (ou nada, se não houver)
+//   sem sku     → só serve se houver exatamente UM PC aberto no lead
+//   dois ou mais SKUs citados → ambíguo, SEMPRE — mesmo que só um PC ainda esteja aberto:
+//                               a chave pode ser do produto cujo PC já fechou
+function escolherPC(leadId, sku, skus) {
+  const abertos = documentos.doTipo(leadId, 'PC').filter(d => d.status === documentos.ABERTO);
+  if (!documentos.doTipo(leadId, 'PC').length) return { pc: null, razao: 'não há pedido de compra para este lead' };
+  const citados = [...new Set([].concat(skus || [], sku ? [sku] : []).map(x => docnum.normalizaSku(x)).filter(Boolean))];
+  if (citados.length > 1) {
+    return { pc: null, ambiguo: true, razao: `o e-mail cita ${citados.length} produtos (${citados.join(', ')}) — não dá para saber de qual é a chave` };
+  }
+  const s = citados[0] || '';
+  if (s) {
+    const pc = abertos.find(d => (d.sku || '') === s);
+    return pc ? { pc } : { pc: null, razao: `não há pedido de compra aberto do produto ${s}` };
+  }
+  if (abertos.length === 1) return { pc: abertos[0] };
+  if (!abertos.length) return { pc: null, razao: 'nenhum pedido de compra aberto' };
+  return { pc: null, ambiguo: true,
+    razao: `há ${abertos.length} pedidos de compra abertos (${abertos.map(d => d.codigo).join(', ')}) e o e-mail não cita o código com o produto` };
+}
+
 /**
  * Chamado quando chega e-mail que cita um pedido de compra nosso.
  *
@@ -280,11 +353,24 @@ function aoReceberDoFornecedor(deps, leadId, entrada) {
   }
   const lead = store.get('leads', leadId);
   if (!lead) return { ok: false, razao: 'lead inexistente' };
-  const pc = documentos.achar(leadId, 'PC');
-  if (!pc) return { ok: false, razao: 'não há pedido de compra para este lead' };
+
+  // Qual PC o e-mail responde. Com um produto só não há dúvida. Com dois, o e-mail tem que
+  // citar o código COM o SKU (NXT-PC-0042-AMPLER): adivinhar entregaria a chave do Ampler
+  // no PV do 1Password.
+  const escolha = escolherPC(leadId, entrada && entrada.sku, entrada && entrada.skus);
+  if (!escolha.pc) {
+    // Resposta de fornecedor que não encaixa em nenhum PC aberto não pode sumir em silêncio:
+    // pode ser a chave que o cliente está esperando.
+    const op = lead.doc_seq ? docnum.formatar('OP', lead.doc_seq) : `lead #${leadId}`;
+    deps.log(leadId, null, 'fluxo', `[compras] E-mail do fornecedor não foi casado com um pedido de compra (${escolha.razao}). Nada foi fechado.`);
+    deps.notify('fluxo_divergencia', `Resposta de fornecedor no pedido ${op} não foi casada — ${escolha.razao}. Confira à mão.`, leadId);
+    return { ok: false, razao: escolha.razao, ambiguo: !!escolha.ambiguo };
+  }
+  const pc = escolha.pc;
+  const item = itemPorSku(lead, pc.sku) || itensDoLead(lead)[0];
 
   // Só o fornecedor deste pedido fecha este pedido.
-  const quem = remetenteEhDoFornecedor(lead, entrada && entrada.from);
+  const quem = remetenteEhDoFornecedor(lead, entrada && entrada.from, item);
   if (!quem.ok) {
     deps.log(leadId, null, 'fluxo', `[compras] E-mail citando ${pc.codigo} NÃO foi aceito como resposta do fornecedor: ${quem.razao}.`);
     deps.notify('fluxo_remetente', `E-mail citando ${pc.codigo} veio de remetente não reconhecido (${quem.razao}). Nada foi fechado — confira à mão.`, leadId);
@@ -298,12 +384,12 @@ function aoReceberDoFornecedor(deps, leadId, entrada) {
 
   // A fatura abre o ciclo financeiro, que corre por fora e não segura a entrega.
   if (pareceFatura(texto)) {
-    const fin = documentos.abrir(leadId, 'FIN');
+    const fin = documentos.abrir(leadId, 'FIN', null, pc.sku || null);
     deps.log(leadId, null, 'doc', `Ciclo financeiro ${fin.codigo} aberto — fatura do fornecedor recebida. Fecha quando for paga e o comprovante voltar.`);
   }
 
   // Etapa 6: o double-check. Divergência PARA aqui e chama gente — não entrega, não fecha.
-  const conferencia = conferir(lead, { chave, qty: entrada && entrada.qty, sku: entrada && entrada.sku, seq: entrada && entrada.seq });
+  const conferencia = conferir(lead, { chave, qty: entrada && entrada.qty, sku: (entrada && entrada.sku) || (entrada && entrada.skus && entrada.skus[0]), seq: entrada && entrada.seq }, item);
   if (!conferencia.ok) {
     deps.log(leadId, null, 'fluxo', `[compras] Conferência REPROVADA: ${conferencia.problemas.join('; ')}. Nada foi entregue ao cliente.`);
     deps.notify('fluxo_divergencia', `Pedido ${pc.codigo}: o que o fornecedor mandou não bate — ${conferencia.problemas.join('; ')}.`, leadId);
@@ -312,11 +398,11 @@ function aoReceberDoFornecedor(deps, leadId, entrada) {
   registrar(deps, leadId, 'compras_confere', 'quantidade, produto e número conferem');
 
   // A chave voltou e confere: o pedido de compra cumpriu o papel dele.
-  documentos.fechar(leadId, 'PC', 'chave recebida do fornecedor e conferida');
+  documentos.fechar(leadId, 'PC', 'chave recebida do fornecedor e conferida', null, pc.sku || null);
 
   // Etapa 7: a entrega. O e-mail com chave + book é para o CLIENTE — não sai sem a caixa
   // @vendas existir. Sem entrega confirmada, o PV continua aberto, que é a regra.
-  const entrega = { assunto: `Sua licença — pedido ${docnum.formatar('PV', lead.doc_seq, lead.doc_sku)}`, chave };
+  const entrega = { assunto: `Sua licença — pedido ${docnum.formatar('PV', lead.doc_seq, pc.sku)}`, chave, sku: pc.sku || null };
   deps.log(leadId, null, 'email_rascunho', `Para o cliente — ${entrega.assunto}\n\nChave de licença registrada. Falta anexar o book de instalação e enviar pela caixa @vendas.`);
   deps.notify('fluxo_entrega', `Pedido ${pc.codigo} conferido: chave pronta para ir ao cliente. Falta a caixa @vendas.`, leadId);
 
@@ -327,13 +413,14 @@ function aoReceberDoFornecedor(deps, leadId, entrada) {
  * A entrega saiu de verdade: registra e fecha o PV. É o único caminho que fecha o pedido,
  * e exige a prova (chave + book) — pagar não é receber.
  */
-function confirmarEntregaAoCliente(deps, leadId, prova) {
-  const r = documentos.fechar(leadId, 'PV', 'chave e book entregues ao cliente', prova);
+// `sku` escolhe o PV no carrinho com dois produtos; omitido, é o PV do pedido de um produto.
+function confirmarEntregaAoCliente(deps, leadId, prova, sku) {
+  const r = documentos.fechar(leadId, 'PV', 'chave e book entregues ao cliente', prova, sku);
   if (!r.ok) return r;
   registrar(deps, leadId, 'vendas_entrega', 'chave e book enviados');
   deps.notify('pedido_entregue', `Pedido ${r.doc.codigo} entregue ao cliente — ciclo de venda fechado.`, leadId);
   return r;
 }
 
-module.exports = { ETAPAS, etapa, ligado, registrar, conferir, textoPedidoDeCompra, aoConfirmarPagamento,
+module.exports = { ETAPAS, etapa, ligado, registrar, itensDoLead, escolherPC, conferir, textoPedidoDeCompra, aoConfirmarPagamento,
   extrairChave, candidatosDeChave, pareceFatura, aoReceberDoFornecedor, confirmarEntregaAoCliente, remetenteEhDoFornecedor };
