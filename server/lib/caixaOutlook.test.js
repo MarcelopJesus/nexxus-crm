@@ -26,16 +26,22 @@ seedIfEmpty();
 
 let caixaDeEntrada;   // mensagens que o Graph "devolve"
 let patches;
+let filtros;          // $filter de cada leitura, para conferir o marcador
 const resposta = (status, corpo) => ({ ok: status >= 200 && status < 300, status, json: async () => corpo, headers: { get: () => null } });
 
 beforeEach(() => {
   patches = [];
+  filtros = [];
   mailer._zerarTokenGraph();
   global.fetch = async (url, opts = {}) => {
     if (url.includes('login.microsoftonline.com')) return resposta(200, { access_token: 'tok', expires_in: 3600 });
+    if (url.startsWith('https://graph.microsoft.com/pagina2')) return resposta(200, { value: caixaDeEntrada.slice(50) });
     if (url.includes('/mailFolders/inbox/messages')) {
       assert.match(url, /patricia\.atendimento%40nexxus\.ia\.br/, 'caixa em minúsculas e codificada');
-      return resposta(200, { value: caixaDeEntrada });
+      filtros.push(new URL(url).searchParams.get('$filter'));
+      const corpo = { value: caixaDeEntrada.slice(0, 50) };
+      if (caixaDeEntrada.length > 50) corpo['@odata.nextLink'] = 'https://graph.microsoft.com/pagina2';
+      return resposta(200, corpo);
     }
     if (opts.method === 'PATCH') {
       patches.push({ url, corpo: JSON.parse(opts.body) });
@@ -58,6 +64,7 @@ const email = (id, de, assunto, texto, extra = {}) => Object.assign({
   from: { emailAddress: { name: 'Cliente', address: de } },
   body: { contentType: 'text', content: texto },
   internetMessageHeaders: [{ name: 'Authentication-Results', value: 'spf=pass; dkim=pass; dmarc=pass' }],
+  receivedDateTime: '2026-09-23T10:00:00Z',
 }, extra);
 
 test('e-mail novo na caixa vira lead com a conversa, e ganha a etiqueta CRM', async () => {
@@ -103,4 +110,49 @@ test('sem EMAIL_PROVIDER=graph a varredura nem chama a Microsoft', async () => {
   assert.match(caixa.motivoDesligado(), /graph/);
   assert.deepEqual(await caixa.varrer(api), { lidas: 0, processadas: 0, puladas: 0, erros: 0 });
   process.env.EMAIL_PROVIDER = 'graph';
+});
+
+test('mais de 50 e-mails: segue a próxima página em vez de parar na primeira', async () => {
+  caixaDeEntrada = Array.from({ length: 51 }, (_, i) => email('lote' + i, 'lote' + i + '@delta.example', 'Pedido ' + i, 'x',
+    { receivedDateTime: `2026-09-23T11:${String(i).padStart(2, '0')}:00Z` }));
+  const r = await caixa.varrer(api);
+  assert.equal(r.processadas, 51);
+  assert.equal(caixaDeEntrada.filter(m => m.categories.includes('CRM')).length, 51);
+});
+
+test('marcador: a próxima leitura começa de onde a anterior terminou, e falha segura o marcador', async () => {
+  store.find('sync_cursors', () => true).forEach(c => store.remove('sync_cursors', c.id));
+  caixaDeEntrada = [
+    email('c1', 'um@eps.example', 'A', 'a', { receivedDateTime: '2026-09-23T12:00:00Z' }),
+    email('c2', 'dois@eps.example', 'B', 'b', { receivedDateTime: '2026-09-23T12:05:00Z' }),
+  ];
+  await caixa.varrer(api);
+  await caixa.varrer(api);
+  assert.equal(filtros[1], 'receivedDateTime ge 2026-09-23T12:05:00Z', 'segunda volta parte do marcador');
+
+  // Um e-mail que estoura no processamento segura o marcador nele (o seguinte é tratado,
+  // mas o marcador não passa do que falhou).
+  const original = api.processarEmailRecebido;
+  const apiFalha = Object.assign({}, api, {
+    processarEmailRecebido: async (ev, req, o) => { if (ev.data.from === 'tres@eps.example') throw new Error('falhou'); return original(ev, req, o); },
+  });
+  caixaDeEntrada.push(
+    email('c3', 'tres@eps.example', 'C', 'c', { receivedDateTime: '2026-09-23T12:10:00Z' }),
+    email('c4', 'quatro@eps.example', 'D', 'd', { receivedDateTime: '2026-09-23T12:15:00Z' }));
+  await caixa.varrer(apiFalha);
+  assert.equal(store.findOne('sync_cursors', c => c.caixa === 'patricia.atendimento@nexxus.ia.br').desde, '2026-09-23T12:05:00Z');
+  assert.deepEqual(caixaDeEntrada[2].categories, [], 'o que falhou fica sem etiqueta para a próxima volta');
+  await caixa.varrer(api);
+  assert.equal(store.findOne('sync_cursors', c => c.caixa === 'patricia.atendimento@nexxus.ia.br').desde, '2026-09-23T12:15:00Z');
+  assert.equal(store.find('activities', a => a.type === 'email_in' && a.email_from === 'tres@eps.example').length, 1);
+});
+
+test('nome de exibição com <outro@endereço> não engana o remetente', async () => {
+  caixaDeEntrada = [email('s1', 'atacante@mal.example', 'Oi', 'x', {
+    from: { emailAddress: { name: 'Cliente <vitima@example.com>', address: 'atacante@mal.example' } },
+    receivedDateTime: '2026-09-23T13:00:00Z',
+  })];
+  await caixa.varrer(api);
+  assert.equal(store.find('activities', a => a.email_from === 'vitima@example.com').length, 0);
+  assert.equal(store.find('activities', a => a.email_from === 'atacante@mal.example').length, 1);
 });
