@@ -94,6 +94,42 @@ function intPositivo(v, padrao){
   const n = Number(v);
   return Number.isInteger(n) && n > 0 ? n : padrao;
 }
+
+// Os itens de um pedido pago do site: [{ productSlug, quantity, name }]. Carrinho com dois
+// produtos vira UM lead (a oportunidade) com dois itens — e cada item ganha o próprio PV e
+// PC, com o SKU no sufixo (09/09). O slug do site é o sku do produto no CRM (catalogSync).
+// Mesmo produto em duas linhas soma a quantidade: dois PV com o mesmo código seriam o
+// mesmo pedido contado duas vezes.
+function itensDoPedido(body){
+  const lista = Array.isArray(body && body.items) ? body.items.slice(0, 50) : [];
+  const porSku = new Map();
+  for (const bruto of lista) {
+    if (!bruto || typeof bruto !== 'object') continue;
+    const slug = String(bruto.productSlug || bruto.slug || '').trim();
+    const nome = String(bruto.name || '').trim().slice(0, 200) || null;
+    const prod = slug ? S.findOne('products', p => String(p.sku||'').toLowerCase() === slug.toLowerCase()) : null;
+    // Sem slug, o nome serve de SKU: é pior que o slug, mas mantém um código por produto.
+    const sku = docnum.normalizaSku(prod ? prod.sku : (slug || nome)) || null;
+    const qty = intPositivo(bruto.quantity, 1);
+    // Agrupa pelo PRODUTO, não pelo SKU normalizado: a normalização corta em 20 letras e
+    // tira hífens, e dois produtos diferentes podem cair no mesmo SKU.
+    const chave = prod ? ('p' + prod.id) : ('s' + (slug || nome || '').toLowerCase());
+    const ja = porSku.get(chave);
+    if (ja) { ja.qty += qty; continue; }
+    porSku.set(chave, { sku, product_id: prod ? prod.id : null, qty, nome: prod ? prod.name : nome });
+  }
+  // Dois produtos com o mesmo SKU normalizado teriam o mesmo código NXT-PV — a chave de um
+  // seria entregue no pedido do outro. O segundo em diante ganha um número no fim.
+  const usados = new Set();
+  const itens = [...porSku.values()];
+  for (const it of itens) {
+    let s = it.sku || '';
+    for (let n = 2; usados.has(s); n++) s = (it.sku || 'ITEM').slice(0, 20 - String(n).length) + n;
+    usados.add(s);
+    it.sku = s || null;
+  }
+  return itens;
+}
 function baseUrl(req){
   if (process.env.BASE_URL) return process.env.BASE_URL.replace(/\/$/,'');
   const h = (req && req.headers)||{};
@@ -708,11 +744,16 @@ async function processarEmailRecebido(body, req, opts = {}) {
   // cliente — quem responde aqui não é quem compra, é quem vende para a gente.
   if (leadId) {
     const citados = docnum.extrairTodos(assunto + '\n' + texto);
-    const citaPC = citados.some(c => c.tipo === 'PC');
-    const pc = documentos.achar(leadId, 'PC');
-    if (citaPC && pc && pc.status === 'open') {
+    const leadDoc = S.get('leads', leadId);
+    const pcsCitados = citados.filter(c => c.tipo === 'PC' && leadDoc && c.seq === Number(leadDoc.doc_seq));
+    const algumPcAberto = documentos.doTipo(leadId, 'PC').some(d => d.status === 'open');
+    if (pcsCitados.length && algumPcAberto) {
       logEmailIn(leadId, from, assunto, texto);
-      const r = fluxo.aoReceberDoFornecedor({ log, notify }, leadId, { texto, from });
+      // O SKU do código citado diz de qual produto é a resposta (carrinho com dois
+      // produtos tem dois PC). Citou mais de um produto: não escolhe — o fluxo trata como
+      // ambíguo e chama gente.
+      const skus = [...new Set(pcsCitados.map(c => c.sku).filter(Boolean))];
+      const r = fluxo.aoReceberDoFornecedor({ log, notify }, leadId, { texto, from, skus });
       return { status:200, body:{ success:true, data:{ lead_id:leadId, fornecedor:true,
         conferido:r.ok, problemas:r.problemas || null } } };
     }
@@ -829,11 +870,18 @@ async function handle(req) {
       // é justamente a transição descrita na seção 11 do DECISOES.md — o PV nasce quando
       // o dinheiro entra. Um site que já mandou o código reaproveita o dele.
       const docSeq = seqDoIntake(body, cf);
-      const docSku = docnum.normalizaSku(prod ? prod.sku : (slug || null)) || null;
-      const lead = S.insert('leads', { title: 'Pedido pago — '+companyName, account_id:acc.id, contact_id:ct.id, product_id: prod?prod.id:null,
+      // Com a lista de itens: um produto só se comporta como antes (SKU e produto no lead);
+      // dois ou mais deixam o lead sem SKU — ele é o OP, e o SKU vai para cada PV/PC.
+      // Sem a lista (site antigo), vale o productSlug/quantity de sempre.
+      const itens = itensDoPedido(body);
+      const umSo = itens.length === 1 ? itens[0] : null;
+      const docSku = itens.length ? (umSo ? umSo.sku : null) : (docnum.normalizaSku(prod ? prod.sku : (slug || null)) || null);
+      const productId = itens.length ? (umSo ? umSo.product_id : null) : (prod ? prod.id : null);
+      const qtdPedido = itens.length ? itens.reduce((a, i) => a + i.qty, 0) : qtyNum;
+      const lead = S.insert('leads', { title: 'Pedido pago — '+companyName, account_id:acc.id, contact_id:ct.id, product_id: productId,
         requested_software: items||message, source:'checkout', stage:'proposta_enviada', owner_id:owner, hot:0,
-        status:'won', lost_reason:null, estimated_value: valueNum||null, qty:qtyNum, kind, preferred_channel:preferredChannel,
-        doc_seq: docSeq, doc_sku: docSku, doc_pago_em: S.now(),
+        status:'won', lost_reason:null, estimated_value: valueNum||null, qty:qtdPedido, kind, preferred_channel:preferredChannel,
+        doc_seq: docSeq, doc_sku: docSku, doc_pago_em: S.now(), itens: itens.length ? itens : null,
         // O protocolo TEM que entrar nas notas também no pedido pago: a deduplicação lá em
         // cima procura exatamente esta marca. Sem ela, webhook do Stripe repetido criava um
         // segundo lead pago — com PV, PC, rascunho e notificações em dobro.
@@ -843,7 +891,10 @@ async function handle(req) {
       // de compra pronto. Com FLUXO_POS_PAGAMENTO desligado (o padrão) nada sai para fora —
       // o e-mail ao fornecedor fica como rascunho esperando um humano.
       const andamento = fluxo.aoConfirmarPagamento({ log, notify }, lead.id);
-      log(lead.id, owner, 'doc', 'Pedido de venda '+andamento.pv.codigo+' aberto — pagamento confirmado. Fecha quando a chave e o book forem enviados ao cliente.');
+      const pvs = andamento.pvs || [andamento.pv];
+      log(lead.id, owner, 'doc', (pvs.length > 1
+        ? ('Pedidos de venda '+pvs.map(d => d.codigo).join(', ')+' abertos — pagamento confirmado. Cada um fecha quando a chave e o book daquele produto forem enviados ao cliente.')
+        : ('Pedido de venda '+pvs[0].codigo+' aberto — pagamento confirmado. Fecha quando a chave e o book forem enviados ao cliente.')));
       notify('order_paid', `Pedido pago no site: ${companyName} — R$ ${valueNum.toLocaleString('pt-BR')}.`, lead.id);
       return { status:201, body:{ success:true, data:{ id:lead.id, owner_id:owner, kind:'order' } } };
     }
