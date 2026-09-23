@@ -27,7 +27,10 @@ const S = require('./store');
 const CATEGORIA = 'CRM';
 const JANELA_MS = 2 * 24 * 3600 * 1000;   // primeira leitura: últimos 2 dias
 const POR_PAGINA = 50;
-const MAX_PAGINAS = 20;                    // 1.000 e-mails por volta; o resto fica para a próxima
+// 1.000 e-mails por volta; o resto fica para a próxima. Limite conhecido: mais de 1.000
+// e-mails com o MESMO receivedDateTime numa caixa travariam o marcador — irreal para as
+// caixas dos agentes, aceito conscientemente (revisão de 23/09).
+const MAX_PAGINAS = 20;
 
 function caixas() {
   return String(process.env.EMAIL_INBOX_MAILBOXES || '')
@@ -98,6 +101,10 @@ async function varrer(api) {
   const token = await mailer.obterTokenGraph();
   for (const caixa of caixas()) {
     const base = `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(caixa)}`;
+    // Primeira leitura da caixa: o ponto de partida vira marcador já, antes de processar.
+    // Senão, se o primeiro e-mail falhasse, a volta seguinte recalcularia "2 dias atrás" e
+    // uma queda longa logo no início empurraria o pendente para fora do filtro.
+    if (!marcadorDe(caixa)) gravarMarcador(caixa, inicioDe(caixa));
     const q = new URLSearchParams({
       // "ge" (e não "gt"): o último e-mail do marcador é relido e pulado pela etiqueta —
       // melhor reler um do que perder o que chegou no mesmo segundo.

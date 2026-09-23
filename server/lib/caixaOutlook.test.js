@@ -156,3 +156,17 @@ test('nome de exibição com <outro@endereço> não engana o remetente', async (
   assert.equal(store.find('activities', a => a.email_from === 'vitima@example.com').length, 0);
   assert.equal(store.find('activities', a => a.email_from === 'atacante@mal.example').length, 1);
 });
+
+test('primeira leitura grava o ponto de partida mesmo se o primeiro e-mail falhar', async () => {
+  const caixaNova = 'cora.compras@nexxus.ia.br';
+  process.env.EMAIL_INBOX_MAILBOXES = caixaNova;
+  const fetchBom = global.fetch;
+  global.fetch = async (url, opts) => url.includes('/mailFolders/inbox/messages')
+    ? resposta(200, { value: [email('f1', 'x@zeta.example', 'Z', 'z', { receivedDateTime: '2026-09-23T14:00:00Z' })] })
+    : fetchBom(url, opts);
+  await caixa.varrer(Object.assign({}, api, { processarEmailRecebido: async () => { throw new Error('falhou'); } }));
+  const m = store.findOne('sync_cursors', c => c.caixa === caixaNova);
+  assert.ok(m && m.desde, 'marcador gravado');
+  assert.ok(Date.parse(m.desde) < Date.parse('2026-09-23T14:00:00Z') || Date.now() - Date.parse(m.desde) <= 2 * 86400000 + 5000);
+  process.env.EMAIL_INBOX_MAILBOXES = 'Patricia.Atendimento@nexxus.ia.br';
+});
