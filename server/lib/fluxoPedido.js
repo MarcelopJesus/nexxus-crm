@@ -21,9 +21,46 @@
 const store = require('./store');
 const documentos = require('./documentos');
 const docnum = require('./docnum');
+const mailer = require('./mailer');
+const { ehCaixaPropria } = require('./caixasProprias');
+
+// Três posições (29/09):
+//   off   — o padrão. Tudo vira rascunho na timeline, nada sai.
+//   teste — os e-mails saem de verdade, mas SÓ para os endereços de FLUXO_EMAIL_PERMITIDOS
+//           (e para as nossas próprias caixas). Destinatário fora da lista vira rascunho.
+//           É o modo de ensaiar o fluxo em produção com o Ítalo no papel de fabricante sem
+//           arriscar um pedido de compra chegando a um fornecedor de verdade.
+//   on    — sai para quem o pedido mandar.
+function modo() {
+  const v = String(process.env.FLUXO_POS_PAGAMENTO || '').trim().toLowerCase();
+  return v === 'on' || v === 'teste' ? v : 'off';
+}
 
 function ligado() {
-  return String(process.env.FLUXO_POS_PAGAMENTO || '').trim().toLowerCase() === 'on';
+  return modo() !== 'off';
+}
+
+function enderecoDe(texto) {
+  const m = String(texto || '').match(/<([^>]+)>/);
+  return (m ? m[1] : String(texto || '')).trim().toLowerCase();
+}
+
+function permitidosNoTeste() {
+  return String(process.env.FLUXO_EMAIL_PERMITIDOS || '')
+    .split(',').map(enderecoDe).filter(e => e.includes('@'));
+}
+
+// Pode sair e-mail para este endereço agora? Devolve o motivo quando não pode — é esse
+// texto que vai para a timeline, para ninguém achar que o fornecedor já foi cobrado.
+function motivoParaNaoEnviar(para) {
+  const m = modo();
+  if (m === 'off') return 'FLUXO_POS_PAGAMENTO desligado';
+  const alvo = enderecoDe(para);
+  if (!alvo.includes('@')) return 'sem endereço de e-mail';
+  if (m === 'teste' && !ehCaixaPropria(alvo) && !permitidosNoTeste().includes(alvo)) {
+    return `modo teste: ${alvo} não está em FLUXO_EMAIL_PERMITIDOS`;
+  }
+  return null;
 }
 
 // As etapas em ordem, com o agente dono de cada uma. É esta lista que a timeline mostra.
@@ -131,6 +168,104 @@ function textoPedidoDeCompra(lead, produto, fornecedor, item) {
   return { assunto, corpo, codigo: pc };
 }
 
+function contatoDoLead(lead) {
+  const ct = lead && lead.contact_id ? store.get('contacts', lead.contact_id) : null;
+  return { nome: (ct && ct.name) || null, email: (ct && ct.email) || null };
+}
+
+function codigosDoPedido(lead) {
+  const seq = Number(lead && lead.doc_seq);
+  const ok = Number.isInteger(seq) && seq > 0;
+  return {
+    op: ok ? docnum.formatar('OP', seq) : `lead #${lead && lead.id}`,
+    pvs: ok ? itensDoLead(lead).map(i => docnum.formatar('PV', seq, i.sku)) : [],
+  };
+}
+
+// Etapa 2 — o aviso instantâneo ao cliente (pendência M45): "isso aí tem que ser instantâneo".
+function textoAvisoCliente(lead) {
+  const { nome } = contatoDoLead(lead);
+  const { pvs } = codigosDoPedido(lead);
+  const ref = pvs.join(', ') || codigosDoPedido(lead).op;
+  const produtos = itensDoLead(lead).map(i => `  • ${i.qty}x ${i.nome || i.sku || 'licença'}`).join('\n');
+  return {
+    assunto: `Pagamento confirmado — pedido ${ref}`,
+    corpo: [
+      `Olá${nome ? ', ' + nome : ''},`,
+      ``,
+      `Recebemos o seu pagamento. Obrigado pela compra!`,
+      ``,
+      `Já estamos gerando a sua licença junto ao fabricante:`,
+      produtos,
+      ``,
+      `Assim que ela chegar, enviamos a chave e o guia de instalação neste mesmo e-mail.`,
+      `Número do seu pedido: ${ref} — se precisar falar com a gente, é só responder citando esse número.`,
+    ].join('\n'),
+  };
+}
+
+// Etapa 3 — vendas passa o pedido para compras. É e-mail interno entre as caixas dos
+// agentes: fica o rastro no Outlook, e a leitura das caixas ignora remetente próprio.
+function textoVendasParaCompras(lead) {
+  const { op, pvs } = codigosDoPedido(lead);
+  const { nome, email } = contatoDoLead(lead);
+  const produtos = itensDoLead(lead).map(i => `  • ${i.qty}x ${i.nome || i.sku || 'licença'}${i.sku ? ' (' + i.sku + ')' : ''}`).join('\n');
+  return {
+    assunto: `Pedido pago ${pvs.join(', ') || op} — solicitar licença ao fabricante`,
+    corpo: [
+      `Compras,`,
+      ``,
+      `Pagamento confirmado para ${nome || 'o cliente'}${email ? ' (' + email + ')' : ''}. Favor solicitar a licença:`,
+      produtos,
+      ``,
+      `Oportunidade: ${op}`,
+      `Pedido(s) de venda: ${pvs.join(', ') || '—'}`,
+      ``,
+      `Vendas`,
+    ].join('\n'),
+  };
+}
+
+// Etapa 6 → 7 — compras devolve para vendas. A chave NÃO vai neste e-mail: ela já está
+// registrada no CRM, e cada cópia a mais é uma cópia a mais de uma licença paga.
+function textoComprasParaVendas(lead, pc) {
+  return {
+    assunto: `Licença conferida — ${pc.codigo}`,
+    corpo: [
+      `Vendas,`,
+      ``,
+      `O fabricante devolveu a licença do pedido ${pc.codigo}. Conferi quantidade, produto e número do pedido: está tudo certo.`,
+      `A chave está registrada no CRM. Pode entregar ao cliente.`,
+      ``,
+      `Compras`,
+    ].join('\n'),
+  };
+}
+
+// Etapa 7 — a entrega. Com o link do book no produto, o e-mail leva os dois; sem ele, leva
+// só a chave e o PV continua aberto (a regra de 09/09: PV fecha com chave + book).
+function textoEntregaCliente(lead, pc, chave, produto) {
+  const { nome } = contatoDoLead(lead);
+  const pv = docnum.formatar('PV', lead.doc_seq, pc.sku);
+  const nomeProduto = (produto && produto.name) || 'seu software';
+  const book = produto && produto.book_url ? String(produto.book_url) : null;
+  return {
+    assunto: `Sua licença — pedido ${pv}`,
+    book,
+    corpo: [
+      `Olá${nome ? ', ' + nome : ''},`,
+      ``,
+      `Sua licença de ${nomeProduto} chegou:`,
+      ``,
+      `Chave de licença: ${chave}`,
+      ``,
+      book ? `Guia de instalação: ${book}` : `O guia de instalação segue em um próximo e-mail.`,
+      ``,
+      `Número do pedido: ${pv}. Qualquer dúvida, é só responder este e-mail.`,
+    ].join('\n'),
+  };
+}
+
 // Ponto de entrada: chamado quando o pagamento é confirmado.
 //
 // `deps` recebe log e notify de fora em vez de importar api.js — api.js já importa este
@@ -157,45 +292,190 @@ function aoConfirmarPagamento(deps, leadId) {
   const itens = itensDoLead(lead);
   const pvs = itens.map(it => documentos.abrir(leadId, 'PV', null, it.sku));
   registrar(deps, leadId, 'pagamento_ok', pvs.map(d => d.codigo).join(', '));
-  registrar(deps, leadId, 'vendas_avisa', ligado() ? null : 'rascunho — aguardando liberação do fluxo');
-  registrar(deps, leadId, 'vendas_compras');
-
   // Um PC por produto: cada um pode ir para um fornecedor diferente, e a resposta de cada
   // fornecedor fecha só o PC dele (é pelo código com o SKU que ela é casada na volta).
-  const pcs = [];
-  const emails = [];
-  for (const it of itens) {
-    const pc = documentos.abrir(leadId, 'PC', null, it.sku);
+  const pcs = itens.map(it => documentos.abrir(leadId, 'PC', null, it.sku));
+  const emails = itens.map((it, i) => {
     const { produto, fornecedor } = produtoEFornecedor(it);
-    const email = textoPedidoDeCompra(lead, produto, fornecedor, it);
-    const para = `Para o fornecedor${fornecedor ? ' (' + fornecedor.name + ')' : ''} — ${email.assunto}\n\n${email.corpo}`;
-    // Sem fornecedor cadastrado a resposta dele nunca será aceita (remetenteEhDoFornecedor
-    // é fail-closed). Melhor avisar agora do que descobrir quando a chave não andar.
-    const semFornecedor = fornecedor ? '' : ' ATENÇÃO: produto sem fornecedor cadastrado — cadastre antes de enviar, senão a resposta não será reconhecida.';
+    return Object.assign(textoPedidoDeCompra(lead, produto, fornecedor, it), { fornecedor, pc: pcs[i] });
+  });
 
-    if (ligado()) {
-      // ⚠️ O envio real ao fornecedor AINDA NÃO EXISTE: depende da caixa @compras, que é
-      // tarefa do Marcelo (fase 4 do plano). Ligar o freio hoje libera o fluxo, mas o
-      // e-mail continua saindo como rascunho — e o texto abaixo diz isso em vez de mentir
-      // "enviado", que faria alguém parar de cobrar o fornecedor achando que já pediu.
-      registrar(deps, leadId, 'compras_pede', `${pc.codigo} — PRONTO PARA ENVIO (a caixa @compras ainda não existe)`);
-      deps.log(leadId, null, 'email_rascunho', para);
-      deps.notify('fluxo_rascunho', `Pedido de compra ${pc.codigo} pronto para envio — falta a caixa @compras.${semFornecedor}`, leadId);
-    } else {
-      // Fail-closed: sem o freio ligado o pedido de compra fica escrito e visível, esperando
-      // um humano. É melhor o pedido parar aqui do que sair sozinho para o fornecedor.
+  if (!ligado()) {
+    // Fail-closed: sem o freio ligado o pedido de compra fica escrito e visível, esperando
+    // um humano. É melhor o pedido parar aqui do que sair sozinho para o fornecedor.
+    registrar(deps, leadId, 'vendas_avisa', 'rascunho — aguardando liberação do fluxo');
+    registrar(deps, leadId, 'vendas_compras');
+    for (const email of emails) {
+      const { fornecedor, pc } = email;
+      const semFornecedor = fornecedor ? '' : ' ATENÇÃO: produto sem fornecedor cadastrado — cadastre antes de enviar, senão a resposta não será reconhecida.';
       registrar(deps, leadId, 'compras_pede', `${pc.codigo} — RASCUNHO, não enviado (FLUXO_POS_PAGAMENTO desligado)`);
-      deps.log(leadId, null, 'email_rascunho', para);
+      deps.log(leadId, null, 'email_rascunho', `Para o fornecedor${fornecedor ? ' (' + fornecedor.name + ')' : ''} — ${email.assunto}\n\n${email.corpo}`);
       deps.notify('fluxo_rascunho', `Pedido de compra ${pc.codigo} pronto para revisão — nada foi enviado ao fornecedor.${semFornecedor}`, leadId);
     }
-    pcs.push(pc);
-    emails.push(email);
+    return { ok: true, pv: pvs[0], pc: pcs[0], email: emails[0], pvs, pcs, emails, envios: [], enviado: false, liberado: false };
   }
 
-  // `enviado` é sempre false até a caixa @compras existir. O campo continua aqui para
-  // quem chama saber que NADA saiu — não é o mesmo que o freio estar ligado.
-  // `pv`/`pc`/`email` (o primeiro) ficam por compatibilidade com o pedido de um produto só.
-  return { ok: true, pv: pvs[0], pc: pcs[0], email: emails[0], pvs, pcs, emails, enviado: false, liberado: ligado() };
+  // Freio ligado (teste ou on): as etapas 2, 3 e 4 viram e-mails de verdade. Aqui só se
+  // MONTA a lista — quem envia é despachar(), que é assíncrona e registra cada etapa só
+  // depois de saber se o e-mail saiu.
+  const { email: emailCliente } = contatoDoLead(lead);
+  const aviso = textoAvisoCliente(lead);
+  const interno = textoVendasParaCompras(lead);
+  const envios = [
+    { etapa: 'vendas_avisa', area: 'vendas', para: emailCliente, destino: 'cliente', assunto: aviso.assunto, corpo: aviso.corpo },
+    { etapa: 'vendas_compras', area: 'vendas', para: caixaDe('compras'), destino: 'compras', assunto: interno.assunto, corpo: interno.corpo,
+      semEndereco: 'a caixa de compras (EMAIL_FROM_COMPRAS) não está configurada' },
+  ].concat(emails.map(e => ({
+    etapa: 'compras_pede', area: 'compras', para: e.fornecedor && e.fornecedor.email ? e.fornecedor.email : null,
+    destino: 'fornecedor' + (e.fornecedor ? ' (' + e.fornecedor.name + ')' : ''), assunto: e.assunto, corpo: e.corpo,
+    codigo: e.pc.codigo,
+    semEndereco: e.fornecedor ? `fornecedor ${e.fornecedor.name} sem e-mail cadastrado` : 'produto sem fornecedor cadastrado',
+  })));
+  return { ok: true, pv: pvs[0], pc: pcs[0], email: emails[0], pvs, pcs, emails, envios: enfileirar(leadId, envios), enviado: false, liberado: true };
+}
+
+
+// Endereço da caixa própria de uma área — só quando ela existe de verdade. Sem a caixa
+// @compras, o e-mail "vendas → compras" iria para o remetente genérico, que é a própria
+// caixa de vendas falando com ela mesma: melhor não mandar e dizer por quê.
+function caixaDe(area) {
+  const c = mailer.caixasConfiguradas()[area];
+  return c && c.propria ? enderecoDe(c.endereco) : null;
+}
+
+function escapaHtml(t) {
+  return String(t).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+function paraHtml(texto) {
+  return `<div style="font-family:Arial,Helvetica,sans-serif;font-size:14px;line-height:1.5;white-space:pre-wrap">${escapaHtml(texto)}</div>`;
+}
+
+// ---- A fila de e-mails do fluxo ----
+//
+// Cada e-mail vira um registro em `fluxo_envios` ANTES de sair, no mesmo passo síncrono
+// que abre PV/PC. O motivo: o Render reinicia o servidor a cada deploy, e um envio que só
+// existisse na memória sumiria em silêncio — com o `jaRodou` impedindo refazer, o pedido
+// de compra nunca sairia e ninguém saberia (achado da revisão de 29/09).
+//
+// Estados: pendente → enviando → enviado | rascunho. Quem fica em `enviando` quando o
+// servidor cai NÃO é reenviado sozinho (pode já ter saído): vira rascunho com aviso, e uma
+// pessoa confere a caixa de enviados antes de mandar de novo pelo botão.
+const FILA = 'fluxo_envios';
+
+function enfileirar(leadId, envios) {
+  return (envios || []).map(e => store.insert(FILA, Object.assign({}, e, {
+    lead_id: Number(leadId), status: 'pendente', motivo: null, message_id: null, tentativas: 0,
+  })));
+}
+
+function doLead(leadId, status) {
+  return store.find(FILA, r => r.lead_id === Number(leadId) && (!status || r.status === status))
+    .sort((a, b) => a.id - b.id);
+}
+
+/**
+ * Envia, em ordem, os registros da fila, e só então registra cada etapa.
+ *
+ * Um e-mail que não pode sair (freio, lista do modo teste, sem endereço, sem book) ou que
+ * o provedor recusa vira RASCUNHO + aviso no sino, e a etapa é registrada dizendo isso. O
+ * laço não para: o aviso ao cliente não ter saído não é motivo para o fornecedor não ser
+ * cobrado.
+ *
+ * deps: { log, notify, logEmailOut(leadId, to, assunto, corpo, messageId), enviar(opts) }
+ */
+async function despachar(deps, leadId, registros) {
+  const resultado = [];
+  for (const reg of registros || []) {
+    const e = store.get(FILA, reg.id);
+    if (!e || e.status !== 'pendente') continue;   // outro despacho já pegou este
+    // A entrega é montada na hora: a chave vem do PC (não fica copiada na fila) e o book
+    // pode ter sido cadastrado depois de o e-mail ter virado rascunho.
+    const pronto = e.tipo === 'entrega' ? montarEntrega(e) : { envio: e };
+    const env = pronto.envio;
+    const motivo = pronto.motivo || (env.para ? motivoParaNaoEnviar(env.para) : (env.semEndereco || 'sem endereço de e-mail'));
+    let r = null;
+    if (!motivo) {
+      store.update(FILA, e.id, { status: 'enviando', tentativas: (e.tentativas || 0) + 1 });
+      try {
+        r = await deps.enviar({ to: enderecoDe(env.para), subject: env.assunto, html: paraHtml(env.corpo), area: env.area });
+      } catch (err) {
+        r = { sent: false, reason: err.message };
+      }
+    }
+    const saiu = !!(r && r.sent);
+    const corpoLog = env.ocultarNoLog || env.corpo;
+    if (saiu) {
+      store.update(FILA, e.id, { status: 'enviado', motivo: null, message_id: r.id || null, enviado_em: store.now() });
+      deps.logEmailOut(leadId, enderecoDe(env.para), env.assunto, corpoLog, r.id || null);
+      if (e.tipo === 'entrega') aoEntregar(deps, leadId, e, env, r);
+      else registrar(deps, leadId, e.etapa, `e-mail enviado para ${e.destino} (${enderecoDe(env.para)})`);
+    } else {
+      const porque = motivo || `o envio falhou (${(r && (r.reason || r.status)) || 'sem resposta do provedor'})`;
+      store.update(FILA, e.id, { status: 'rascunho', motivo: porque });
+      registrar(deps, leadId, e.etapa, `RASCUNHO, não enviado — ${porque}`);
+      deps.log(leadId, null, 'email_rascunho', `Para ${e.destino}${env.para ? ' <' + enderecoDe(env.para) + '>' : ''} — ${env.assunto}\n\n${corpoLog}`);
+      deps.notify(motivo ? 'fluxo_rascunho' : 'fluxo_falha_envio',
+        `${e.codigo ? e.codigo + ': ' : ''}e-mail para ${e.destino} não saiu — ${porque}. Está como rascunho; depois de corrigir, use "Reenviar e-mails do fluxo" no card.`, leadId);
+    }
+    resultado.push({ etapa: e.etapa, destino: e.destino, enviado: saiu, motivo: saiu ? null : (motivo || 'falha no envio') });
+  }
+  return resultado;
+}
+
+// Etapa 7 montada na hora do envio.
+function montarEntrega(e) {
+  const lead = store.get('leads', e.lead_id);
+  const pc = lead ? documentos.achar(e.lead_id, 'PC', e.pc_sku || null) : null;
+  const chave = pc && pc.chave_licenca;
+  if (!lead || !pc || !chave) return { envio: e, motivo: 'a chave de licença não está registrada no pedido de compra' };
+  const item = itemPorSku(lead, pc.sku) || itensDoLead(lead)[0];
+  const { produto } = produtoEFornecedor(item);
+  const carta = textoEntregaCliente(lead, pc, chave, produto);
+  const envio = Object.assign({}, e, { assunto: carta.assunto, corpo: carta.corpo,
+    ocultarNoLog: carta.corpo.split(chave).join('[chave registrada — oculta no histórico]'), book: carta.book });
+  // Sem o book o PV não fecha (regra de 09/09). Mandar a chave sozinha deixaria o pedido
+  // aberto para sempre: não existe caminho que mande o book depois. Segura e pede o link.
+  if (!carta.book) {
+    return { envio, motivo: `o produto ${(produto && produto.name) || pc.sku || ''} está sem o link do book de instalação — cadastre em Catálogo & Regras` };
+  }
+  return { envio };
+}
+
+function aoEntregar(deps, leadId, e, env, r) {
+  const pc = documentos.achar(leadId, 'PC', e.pc_sku || null);
+  const fechou = documentos.fechar(leadId, 'PV', 'chave e book entregues ao cliente',
+    { chave: pc && pc.chave_licenca, book: !!env.book, messageId: r.id || '' }, e.pc_sku || null);
+  if (fechou.ok) {
+    registrar(deps, leadId, 'vendas_entrega', `e-mail enviado para ${enderecoDe(env.para)}`);
+    deps.notify('pedido_entregue', `Pedido ${fechou.doc.codigo} entregue ao cliente — ciclo de venda fechado.`, leadId);
+  } else {
+    deps.log(leadId, null, 'fluxo', `[vendas] Chave enviada ao cliente (${enderecoDe(env.para)}), mas o pedido de venda continua ABERTO: ${fechou.razao}.`);
+    deps.notify('fluxo_entrega', `Pedido ${e.codigo || ''}: chave entregue, pedido de venda ainda aberto — ${fechou.razao}.`, leadId);
+  }
+}
+
+// Ao subir o servidor: o que ficou `pendente` sai agora; o que ficou `enviando` vira
+// rascunho com aviso (pode ter saído — reenviar às cegas mandaria duas vezes).
+function retomarPendentes(deps) {
+  const interrompidos = store.find(FILA, r => r.status === 'enviando');
+  for (const r of interrompidos) {
+    const porque = 'o servidor reiniciou no meio do envio — pode ter saído; confira a caixa de enviados antes de reenviar';
+    store.update(FILA, r.id, { status: 'rascunho', motivo: porque });
+    deps.log(r.lead_id, null, 'fluxo', `[${(etapa(r.etapa) || {}).agente || 'sistema'}] E-mail para ${r.destino} interrompido: ${porque}.`);
+    deps.notify('fluxo_falha_envio', `E-mail do fluxo para ${r.destino} interrompido — ${porque}.`, r.lead_id);
+  }
+  const pendentes = store.find(FILA, r => r.status === 'pendente');
+  const porLead = {};
+  for (const r of pendentes) (porLead[r.lead_id] = porLead[r.lead_id] || []).push(r);
+  return Object.entries(porLead).map(([leadId, regs]) => ({ leadId: Number(leadId), registros: regs.sort((a, b) => a.id - b.id) }));
+}
+
+// Botão "Reenviar e-mails do fluxo": o que virou rascunho volta para a fila. Depois de
+// cadastrar o e-mail do fornecedor, o book, ou de trocar o freio de teste para on.
+function paraReenviar(leadId) {
+  const rascunhos = doLead(leadId, 'rascunho');
+  for (const r of rascunhos) store.update(FILA, r.id, { status: 'pendente' });
+  return rascunhos;
 }
 
 
@@ -388,6 +668,13 @@ function aoReceberDoFornecedor(deps, leadId, entrada) {
     deps.log(leadId, null, 'doc', `Ciclo financeiro ${fin.codigo} aberto — fatura do fornecedor recebida. Fecha quando for paga e o comprovante voltar.`);
   }
 
+  // Fatura que chega antes da chave (a caixa do financeiro também é lida) não é
+  // divergência: o FIN já foi aberto acima, e a chave ainda vai chegar.
+  if (!chave && pareceFatura(texto)) {
+    deps.log(leadId, null, 'fluxo', `[compras] Fatura de ${pc.codigo} recebida antes da chave — aguardando a chave do fornecedor.`);
+    return { ok: false, razao: 'só a fatura, sem chave ainda', fatura: true, chave: null, envios: [] };
+  }
+
   // Etapa 6: o double-check. Divergência PARA aqui e chama gente — não entrega, não fecha.
   const conferencia = conferir(lead, { chave, qty: entrada && entrada.qty, sku: (entrada && entrada.sku) || (entrada && entrada.skus && entrada.skus[0]), seq: entrada && entrada.seq }, item);
   if (!conferencia.ok) {
@@ -398,15 +685,30 @@ function aoReceberDoFornecedor(deps, leadId, entrada) {
   registrar(deps, leadId, 'compras_confere', 'quantidade, produto e número conferem');
 
   // A chave voltou e confere: o pedido de compra cumpriu o papel dele.
-  documentos.fechar(leadId, 'PC', 'chave recebida do fornecedor e conferida', null, pc.sku || null);
+  // A chave fica guardada UMA vez, no próprio PC: é de lá que a entrega a lê na hora de
+  // enviar (inclusive num reenvio depois de um deploy), sem cópia na fila de e-mails.
+  const pcFechado = documentos.fechar(leadId, 'PC', 'chave recebida do fornecedor e conferida', null, pc.sku || null);
+  if (pcFechado.ok && pcFechado.doc) store.update('documents', pcFechado.doc.id, { chave_licenca: chave });
 
-  // Etapa 7: a entrega. O e-mail com chave + book é para o CLIENTE — não sai sem a caixa
-  // @vendas existir. Sem entrega confirmada, o PV continua aberto, que é a regra.
+  // Etapa 7: a entrega. O e-mail com chave + book é para o CLIENTE.
   const entrega = { assunto: `Sua licença — pedido ${docnum.formatar('PV', lead.doc_seq, pc.sku)}`, chave, sku: pc.sku || null };
-  deps.log(leadId, null, 'email_rascunho', `Para o cliente — ${entrega.assunto}\n\nChave de licença registrada. Falta anexar o book de instalação e enviar pela caixa @vendas.`);
-  deps.notify('fluxo_entrega', `Pedido ${pc.codigo} conferido: chave pronta para ir ao cliente. Falta a caixa @vendas.`, leadId);
+  if (!ligado()) {
+    deps.log(leadId, null, 'email_rascunho', `Para o cliente — ${entrega.assunto}\n\nChave de licença registrada. Falta anexar o book de instalação e enviar pela caixa @vendas.`);
+    deps.notify('fluxo_entrega', `Pedido ${pc.codigo} conferido: chave pronta para ir ao cliente. Nada foi enviado (FLUXO_POS_PAGAMENTO desligado).`, leadId);
+    return { ok: true, chave, entrega, envios: [], pvFechado: false };
+  }
 
-  return { ok: true, chave, entrega, pvFechado: false };
+  // Freio ligado: compras avisa vendas (interno) e vendas entrega ao cliente. A entrega é
+  // montada na hora do envio (montarEntrega) e o PV só fecha com o id do provedor na mão.
+  const interno = textoComprasParaVendas(lead, pc);
+  const { email: emailCliente } = contatoDoLead(lead);
+  const envios = enfileirar(leadId, [
+    { etapa: 'compras_confere', area: 'compras', para: caixaDe('vendas'), destino: 'vendas', assunto: interno.assunto, corpo: interno.corpo,
+      semEndereco: 'a caixa de vendas (EMAIL_FROM_VENDAS) não está configurada' },
+    { etapa: 'vendas_entrega', tipo: 'entrega', pc_sku: pc.sku || null, area: 'vendas', para: emailCliente, destino: 'cliente',
+      assunto: entrega.assunto, corpo: '', codigo: pc.codigo, semEndereco: 'o cliente não tem e-mail cadastrado' },
+  ]);
+  return { ok: true, chave, entrega, envios, pvFechado: false };
 }
 
 /**
@@ -422,5 +724,5 @@ function confirmarEntregaAoCliente(deps, leadId, prova, sku) {
   return r;
 }
 
-module.exports = { ETAPAS, etapa, ligado, registrar, itensDoLead, escolherPC, conferir, textoPedidoDeCompra, aoConfirmarPagamento,
+module.exports = { ETAPAS, etapa, modo, ligado, motivoParaNaoEnviar, despachar, enfileirar, retomarPendentes, paraReenviar, registrar, itensDoLead, escolherPC, conferir, textoPedidoDeCompra, aoConfirmarPagamento,
   extrairChave, candidatosDeChave, pareceFatura, aoReceberDoFornecedor, confirmarEntregaAoCliente, remetenteEhDoFornecedor };

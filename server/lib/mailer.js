@@ -71,6 +71,8 @@ function caixasConfiguradas() {
   return saida;
 }
 
+const { caixasProprias, ehCaixaPropria } = require('./caixasProprias');
+
 // Tudo que sai daqui é máquina falando (a Patrícia), nunca uma pessoa digitando. Estes
 // cabeçalhos são o que impede o autoresponder do outro lado de responder de volta e os
 // dois robôs entrarem em pingue-pongue infinito. Ficam no mailer, e não em cada chamador,
@@ -189,5 +191,5 @@ async function sendEmail({ to, subject, html, headers, replyTo, area }) {
 
 function _zerarTokenGraph() { tokenGraph = null; }   // só para os testes
 
-module.exports = { sendEmail, isConfigured, remetenteDe, caixasConfiguradas, CAIXAS, HEADERS_AUTOMATICO,
+module.exports = { sendEmail, isConfigured, remetenteDe, caixasConfiguradas, caixasProprias, ehCaixaPropria, CAIXAS, HEADERS_AUTOMATICO,
   provedor, credenciaisGraph, obterTokenGraph, _zerarTokenGraph };

@@ -179,6 +179,12 @@ ready.then(() => server.listen(PORT, HOST, () => {
   } else {
     console.log('[catalogo] sync desligada — defina SITE_CATALOG_URL e SITE_CATALOG_KEY para ligar');
   }
+  // E-mails do fluxo pós-pagamento que um deploy interrompeu (ver fluxoPedido.js).
+  try {
+    const retomados = apiModulo.retomarFluxoPendente();
+    if (retomados) console.log(`[fluxo] retomando e-mails pendentes de ${retomados} pedido(s)`);
+  } catch (e) { console.error('[fluxo] falha ao retomar e-mails pendentes:', e.message); }
+  console.log(`[fluxo] pós-pagamento: FLUXO_POS_PAGAMENTO=${require('./lib/fluxoPedido').modo()}`);
   console.log(`[followup] varredura ativa — lead sem resposta vira perdido em ${autoLostDays()} dias`);
   varreduraSegura();
   setInterval(varreduraSegura, SWEEP_MS).unref();

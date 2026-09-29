@@ -58,8 +58,11 @@ function pedidoDoSite(items, extra) {
 }
 
 let svix = 0;
-function emailEntrando(from, subject, text) {
-  const payload = { type: 'email.received', data: { from, to: ['patricia@nexxustech.ia.br'], subject, text } };
+// O carimbo que o nosso servidor põe no e-mail recebido: sem ele, resposta de fornecedor
+// não é processada (exigência de 29/09 contra resposta forjada).
+const AUTENTICADO = [{ name: 'Authentication-Results', value: 'spf=pass smtp.mailfrom=x; dkim=pass header.d=x; dmarc=pass action=none header.from=x' }];
+function emailEntrando(from, subject, text, headers) {
+  const payload = { type: 'email.received', data: { from, to: ['patricia@nexxustech.ia.br'], subject, text, headers: headers || AUTENTICADO } };
   const corpoCru = JSON.stringify(payload);
   const id = 'msg_m44_' + (++svix);
   const ts = Math.floor(Date.now() / 1000);
