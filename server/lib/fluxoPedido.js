@@ -346,8 +346,10 @@ function caixaDe(area) {
 function escapaHtml(t) {
   return String(t).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
+// Quebra de linha vira <br> de verdade: o Outlook ignora o white-space:pre-wrap e emendava
+// o e-mail inteiro num parágrafo só (visto no ensaio de 29/09).
 function paraHtml(texto) {
-  return `<div style="font-family:Arial,Helvetica,sans-serif;font-size:14px;line-height:1.5;white-space:pre-wrap">${escapaHtml(texto)}</div>`;
+  return `<div style="font-family:Arial,Helvetica,sans-serif;font-size:14px;line-height:1.5">${escapaHtml(texto).replace(/\r?\n/g, '<br>')}</div>`;
 }
 
 // ---- A fila de e-mails do fluxo ----
