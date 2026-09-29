@@ -5,6 +5,7 @@ const { verifyPassword, sign, hashPassword } = require('./auth');
 const { getUsdBrl } = require('./fx');
 const { calculatePricing } = require('./pricing');
 const { sendEmail, isConfigured } = require('./mailer');
+const { ehCaixaPropria } = require('./caixasProprias');
 const sdr = require('./sdr');
 const catalog = require('./catalogSync');
 const faq = require('./faq');
@@ -429,6 +430,33 @@ function logEmailIn(leadId, from, subject, body) {
     ai_summary:null, ai_intent:null });
 }
 
+// Envios do fluxo pós-pagamento (fluxoPedido.despachar). Não são aguardados por quem
+// chamou: o site espera a resposta do webhook por 10s, e três e-mails pelo Graph podem
+// passar disso. Ficam numa lista para os testes (e o encerramento) poderem esperar.
+const despachosDoFluxo = new Set();
+function despacharFluxo(leadId, envios) {
+  if (!envios || !envios.length) return null;
+  const deps = { log, notify, enviar: sendEmail,
+    logEmailOut: (id, to, assunto, corpo, messageId) => logEmailOut(id, null, to, assunto, corpo, messageId) };
+  const p = fluxo.despachar(deps, leadId, envios)
+    .catch(e => {
+      console.error(`[fluxo] falha ao despachar e-mails do lead #${leadId}: ${e.message}`);
+      notify('fluxo_falha_envio', `Os e-mails do fluxo pós-pagamento pararam no meio: ${e.message}. Confira a timeline.`, leadId);
+    })
+    .finally(() => despachosDoFluxo.delete(p));
+  despachosDoFluxo.add(p);
+  return p;
+}
+// Ao subir o servidor: retoma o que um deploy interrompeu (ver fluxoPedido.retomarPendentes).
+function retomarFluxoPendente() {
+  const grupos = fluxo.retomarPendentes({ log, notify });
+  for (const g of grupos) despacharFluxo(g.leadId, g.registros);
+  return grupos.length;
+}
+async function aguardarDespachosDoFluxo() {
+  while (despachosDoFluxo.size) await Promise.all([...despachosDoFluxo]);
+}
+
 // M28 — "e-mail in" com resumo da IA. O evento na timeline precisa dizer O QUE o cliente
 // pediu ("cliente solicitou V2"), não despejar o e-mail inteiro: é assim que a régua de
 // tempo entre o que saiu e o que voltou fica legível. O resumo vem da classificação que o
@@ -528,6 +556,9 @@ function leadWithJoins(id) {
     owner_name: u ? u.name : null, product_name: p ? p.name : null,
     supplier_name: sup ? sup.name : null,
     contract_status: ctr ? ctr.status : null,
+    // E-mails do fluxo pós-pagamento que ficaram como rascunho — é o que acende o botão
+    // "Reenviar e-mails do fluxo" no card.
+    fluxo_rascunhos: S.find('fluxo_envios', r => r.lead_id === l.id && r.status === 'rascunho').length,
     // Os códigos são derivados do sequencial na saída, nunca guardados prontos: assim OP,
     // PV e PC não têm como divergir entre si nem ficar velhos quando o SKU muda.
     doc: docnum.codigosDoLead(l),
@@ -709,6 +740,9 @@ async function processarEmailRecebido(body, req, opts = {}) {
 
   const from = extraiEmail(d.from);
   if (!from) return ignorado('sem remetente');
+  // As caixas dos agentes conversam entre si no fluxo pós-pagamento (vendas → compras).
+  // Esse e-mail chega na caixa da outra, que o CRM lê — e não é cliente nem fornecedor.
+  if (ehCaixaPropria(from)) return ignorado('e-mail interno entre as caixas dos agentes ('+from+')');
   // Trava de laço: resposta automática do outro lado (férias, bounce, lista) nunca pode
   // acionar a Patrícia, senão os dois robôs conversam para sempre.
   const laco = respostaAutomatica(d, from);
@@ -749,11 +783,22 @@ async function processarEmailRecebido(body, req, opts = {}) {
     const algumPcAberto = documentos.doTipo(leadId, 'PC').some(d => d.status === 'open');
     if (pcsCitados.length && algumPcAberto) {
       logEmailIn(leadId, from, assunto, texto);
+      // A resposta do fornecedor fecha pedido de compra e manda chave ao cliente. O From
+      // sozinho não prova quem mandou (o endereço do fornecedor está no próprio pedido de
+      // compra, e o número NXT-PC é sequencial): exige a autenticação aprovada pelo nosso
+      // servidor de e-mail. Sem ela, fica para uma pessoa (revisão de 29/09).
+      const aut = autenticacaoDoFornecedor(d);
+      if (!aut.ok) {
+        log(leadId, null, 'fluxo', `[compras] E-mail de ${from} citando pedido de compra NÃO foi processado: ${aut.razao}. Nada foi fechado.`);
+        notify('fluxo_remetente', `Resposta de fornecedor sem autenticação confirmada (${aut.razao}) — confira à mão antes de entregar qualquer chave.`, leadId);
+        return { status:200, body:{ success:true, data:{ lead_id:leadId, fornecedor:true, conferido:false, problemas:[aut.razao] } } };
+      }
       // O SKU do código citado diz de qual produto é a resposta (carrinho com dois
       // produtos tem dois PC). Citou mais de um produto: não escolhe — o fluxo trata como
       // ambíguo e chama gente.
       const skus = [...new Set(pcsCitados.map(c => c.sku).filter(Boolean))];
       const r = fluxo.aoReceberDoFornecedor({ log, notify }, leadId, { texto, from, skus });
+      despacharFluxo(leadId, r.envios);
       return { status:200, body:{ success:true, data:{ lead_id:leadId, fornecedor:true,
         conferido:r.ok, problemas:r.problemas || null } } };
     }
@@ -891,6 +936,7 @@ async function handle(req) {
       // de compra pronto. Com FLUXO_POS_PAGAMENTO desligado (o padrão) nada sai para fora —
       // o e-mail ao fornecedor fica como rascunho esperando um humano.
       const andamento = fluxo.aoConfirmarPagamento({ log, notify }, lead.id);
+      despacharFluxo(lead.id, andamento.envios);
       const pvs = andamento.pvs || [andamento.pv];
       log(lead.id, owner, 'doc', (pvs.length > 1
         ? ('Pedidos de venda '+pvs.map(d => d.codigo).join(', ')+' abertos — pagamento confirmado. Cada um fecha quando a chave e o book daquele produto forem enviados ao cliente.')
@@ -1543,8 +1589,56 @@ async function handle(req) {
   if (method==='GET' && path==='/api/contacts') { const am=byId('accounts'); return okList(S.all('contacts').sort(byName).map(c=>Object.assign({}, c, { account_name:c.account_id&&am[c.account_id]?am[c.account_id].name:null }))); }
   if (method==='GET' && path==='/api/suppliers') return okList(S.all('suppliers').sort(byName));
   if (method==='GET' && path==='/api/products') { const sm=byId('suppliers'); return okList(S.all('products').sort(byName).map(p=>Object.assign({}, p, { supplier_name:p.supplier_id&&sm[p.supplier_id]?sm[p.supplier_id].name:null }))); }
-  if (method==='POST' && path==='/api/suppliers') return { status:201, body:{ success:true, data: S.insert('suppliers', { name:body.name, country:body.country||null, currency:body.currency||'USD' }) } };
-  if (method==='POST' && path==='/api/products') return { status:201, body:{ success:true, data: S.insert('products', { supplier_id:body.supplier_id||null, name:body.name, sku:body.sku||null, list_cost_usd:body.list_cost_usd||null, currency:body.currency||'USD' }) } };
+  if (method==='POST' && path==='/api/suppliers') {
+    if (!canArea(user,'admin')) return forbidden('Apenas Admin cadastra fornecedores.');
+    const email = emailDeFornecedor(body.email);
+    if (email === false) return badRequest('E-mail do fornecedor inválido.');
+    return { status:201, body:{ success:true, data: S.insert('suppliers', { name:body.name, country:body.country||null, currency:body.currency||'USD', email }) } };
+  }
+  // Botão "Reenviar e-mails do fluxo": o que virou rascunho volta para a fila e sai de novo,
+  // reavaliando tudo (freio, lista do modo teste, e-mail do fornecedor, book).
+  if ((m=P(/^\/api\/leads\/(\d+)\/fluxo\/reenviar$/)) && method==='POST') {
+    if (!canArea(user,'admin')) return forbidden('Apenas Admin reenvia e-mails do fluxo.');
+    const leadId = +m[1];
+    if (!S.get('leads', leadId)) return notfound();
+    const regs = fluxo.paraReenviar(leadId);
+    if (!regs.length) return { status:200, body:{ success:true, data:{ reenviados:0, resultado:[] } } };
+    log(leadId, user.id, 'fluxo', `${user.name||'Admin'} mandou reenviar ${regs.length} e-mail(s) do fluxo que estavam como rascunho.`);
+    const resultado = await despacharFluxo(leadId, regs);
+    return { status:200, body:{ success:true, data:{ reenviados:regs.length, resultado: resultado || [] } } };
+  }
+  // O e-mail do fornecedor é para onde compras manda o pedido de compra E a única origem
+  // aceita para a resposta com a chave (remetenteEhDoFornecedor). Por isso só o admin muda.
+  if ((m=P(/^\/api\/suppliers\/(\d+)$/)) && method==='PATCH') {
+    if (!canArea(user,'admin')) return forbidden('Apenas Admin altera fornecedores.');
+    const sup = S.get('suppliers', +m[1]);
+    if (!sup) return notfound();
+    const patch = {};
+    if ('email' in body) { const email = emailDeFornecedor(body.email); if (email === false) return badRequest('E-mail do fornecedor inválido.'); patch.email = email; }
+    if ('country' in body) patch.country = body.country || null;
+    const r = S.update('suppliers', sup.id, patch);
+    log(null, user.id, 'catalog', `Fornecedor ${sup.name} atualizado${'email' in patch ? ' — e-mail: '+(patch.email||'(removido)') : ''}.`);
+    return { status:200, body:{ success:true, data:r } };
+  }
+  // O link do book de instalação vai no e-mail de entrega; sem ele o PV não fecha.
+  if ((m=P(/^\/api\/products\/(\d+)$/)) && method==='PATCH') {
+    if (!canArea(user,'admin')) return forbidden('Apenas Admin altera produtos.');
+    const prod = S.get('products', +m[1]);
+    if (!prod) return notfound();
+    const patch = {};
+    if ('book_url' in body) {
+      const url = String(body.book_url || '').trim();
+      if (url && !/^https:\/\/\S+$/i.test(url)) return badRequest('O link do book precisa começar com https://');
+      patch.book_url = url || null;
+    }
+    if ('supplier_id' in body) {
+      const sid = body.supplier_id ? Number(body.supplier_id) : null;
+      if (sid && !S.get('suppliers', sid)) return badRequest('Fornecedor inexistente.');
+      patch.supplier_id = sid;
+    }
+    return { status:200, body:{ success:true, data: S.update('products', prod.id, patch) } };
+  }
+  if (method==='POST' && path==='/api/products') return !canArea(user,'admin') ? forbidden('Apenas Admin cadastra produtos.') : { status:201, body:{ success:true, data: S.insert('products', { supplier_id:body.supplier_id||null, name:body.name, sku:body.sku||null, list_cost_usd:body.list_cost_usd||null, currency:body.currency||'USD' }) } };
   if (method==='POST' && path==='/api/accounts') return { status:201, body:{ success:true, data: S.insert('accounts', { name:body.name, cnpj:body.cnpj||null, segment:body.segment||null, city:body.city||null }) } };
   if (method==='POST' && path==='/api/contacts') return { status:201, body:{ success:true, data: S.insert('contacts', { account_id:body.account_id||null, name:body.name, email:body.email||null, phone:body.phone||null, role_title:body.role_title||null }) } };
 
@@ -1597,6 +1691,13 @@ async function handle(req) {
 function publicUser(u){ return { id:u.id, name:u.name, email:u.email, area:u.area, role:u.role }; }
 function canArea(user, area){ return user.role==='admin' || user.area==='admin' || user.area===area; }
 function forbidden(msg){ return { status:403, body:{ success:false, error:{ message:msg } } }; }
+function badRequest(msg){ return { status:400, body:{ success:false, error:{ message:msg } } }; }
+// E-mail de fornecedor: vazio = sem e-mail (null); inválido = false, para a rota recusar.
+function emailDeFornecedor(v){
+  const e = String(v == null ? '' : v).trim().toLowerCase();
+  if (!e) return null;
+  return /^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+$/.test(e) ? e : false;
+}
 function notfound(){ return { status:404, body:{ success:false, error:{ message:'Não encontrado.' } } }; }
 function okList(arr){ return { status:200, body:{ success:true, data: arr } }; }
 function byName(a,b){ return String(a.name||'').localeCompare(String(b.name||'')); }
@@ -1636,6 +1737,28 @@ function ignorado(motivo) {
 
 // Cabeçalhos do e-mail recebido, em minúsculas. O Resend manda como objeto ou como
 // lista [{name,value}] dependendo do formato — aceita os dois.
+// Autenticação exigida da resposta do fornecedor: DMARC aprovado, ou SPF e DKIM aprovados.
+// Vale o PRIMEIRO Authentication-Results da lista — é o que o nosso servidor (Microsoft)
+// carimbou ao receber. Os de baixo vieram com a mensagem e podem ter sido escritos por quem
+// forjou o e-mail; o cabecalhosDe, que guarda o último, não serve aqui.
+function autenticacaoDoFornecedor(d) {
+  const h = d && d.headers;
+  let ar = '';
+  if (Array.isArray(h)) {
+    const primeiro = h.find(x => x && String(x.name || '').toLowerCase() === 'authentication-results');
+    ar = primeiro ? String(primeiro.value || '') : '';
+  } else if (h && typeof h === 'object') {
+    const k = Object.keys(h).find(n => n.toLowerCase() === 'authentication-results');
+    ar = k ? String(h[k] || '') : '';
+  }
+  if (!ar) return { ok:false, razao:'sem Authentication-Results no e-mail' };
+  const t = ar.toLowerCase();
+  if (/\bdmarc=pass\b/.test(t)) return { ok:true };
+  if (/\bspf=pass\b/.test(t) && /\bdkim=pass\b/.test(t)) return { ok:true };
+  const dm = (t.match(/\bdmarc=(\w+)/) || [])[1] || 'ausente';
+  return { ok:false, razao:'autenticação não aprovada (dmarc='+dm+')' };
+}
+
 function cabecalhosDe(d) {
   const out = {};
   const h = d && d.headers;
@@ -1825,7 +1948,7 @@ function dispararFaq(leadId, pendencia, resposta, userId){
 
 // log/notify saem daqui para o followups.js escrever timeline e sino no mesmo formato.
 // Os passos do funil saem para o agentNexus.js executar exatamente o que o humano executa.
-module.exports = { handle, log, notify, leadWithJoins, clientName, OPCOES_RECUSA_PADRAO,
+module.exports = { handle, log, notify, aguardarDespachosDoFluxo, retomarFluxoPendente, leadWithJoins, clientName, OPCOES_RECUSA_PADRAO,
   triageLead, closeLost, createQuote, savePricingFor, createProposal, promoverProposta, sendProposalEmail, emitirEEnviarProposta,
   abrirPendenciaDeEmail, limparPendenciaDeEmail, responderPendenciaDeEmail,
   logEmailIn, logEmailOut, anotarResumoEmail, SIGNATURE_TEXT, SIGNATURE_HTML,

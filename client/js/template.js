@@ -468,16 +468,19 @@ function APP_TEMPLATE() { return `
           <div>
             <div class="card card-p mb">
               <div class="section-title">Fornecedores (fabricantes)</div>
-              <table class="tbl"><tbody><tr v-for="s in S.suppliers" :key="s.id"><td>{{ s.name }}</td><td class="muted">{{ s.country }}</td><td>{{ s.currency }}</td></tr></tbody></table>
+              <table class="tbl"><tbody><tr v-for="s in S.suppliers" :key="s.id"><td>{{ s.name }}</td><td class="muted">{{ s.country }}</td><td>{{ s.currency }}</td>
+                <td><div class="flex gap"><input v-model="s.email" type="email" placeholder="e-mail para pedidos de compra" title="Para onde compras manda o pedido. Só este endereço é aceito na resposta com a chave." style="flex:1;min-width:180px;padding:6px 8px;border:1px solid var(--nx-border);border-radius:8px"/><button class="btn btn-sm btn-ghost" @click="saveSupplierEmail(s)">Salvar</button></div></td></tr></tbody></table>
               <div class="flex gap wrap mt">
                 <input v-model="S.newSupplier.name" placeholder="Nome" style="flex:1;padding:8px;border:1px solid var(--nx-border);border-radius:8px"/>
                 <input v-model="S.newSupplier.country" placeholder="País" style="width:90px;padding:8px;border:1px solid var(--nx-border);border-radius:8px"/>
+                <input v-model="S.newSupplier.email" type="email" placeholder="E-mail" style="width:170px;padding:8px;border:1px solid var(--nx-border);border-radius:8px"/>
                 <button class="btn btn-sm" @click="addSupplier">Add</button>
               </div>
             </div>
             <div class="card card-p">
               <div class="section-title">Produtos (catálogo)</div>
-              <table class="tbl"><tbody><tr v-for="p in S.products" :key="p.id"><td>{{ p.name }}</td><td class="muted">{{ p.supplier_name }}</td><td class="mono">{{ p.currency }} {{ p.list_cost_usd }}</td></tr></tbody></table>
+              <table class="tbl"><tbody><tr v-for="p in S.products" :key="p.id"><td>{{ p.name }}</td><td class="muted">{{ p.supplier_name }}</td><td class="mono">{{ p.currency }} {{ p.list_cost_usd }}</td>
+                <td><div class="flex gap"><input v-model="p.book_url" placeholder="https:// link do book de instalação" title="Vai no e-mail de entrega da licença. Sem ele o pedido de venda não fecha." style="flex:1;min-width:180px;padding:6px 8px;border:1px solid var(--nx-border);border-radius:8px"/><button class="btn btn-sm btn-ghost" @click="saveProductBook(p)">Salvar</button></div></td></tr></tbody></table>
               <div class="flex gap wrap mt">
                 <select v-model="S.newProduct.supplier_id" style="padding:8px;border:1px solid var(--nx-border);border-radius:8px"><option value="">Fornecedor</option><option v-for="s in S.suppliers" :value="s.id">{{ s.name }}</option></select>
                 <input v-model="S.newProduct.name" placeholder="Produto" style="flex:1;padding:8px;border:1px solid var(--nx-border);border-radius:8px"/>
@@ -545,6 +548,12 @@ function DRAWER_TEMPLATE() { return `
           </div>
           <h2 style="margin:8px 0 2px">{{ S.drawer.lead.title }}</h2>
           <div class="muted small">{{ S.drawer.lead.account_name }} · {{ S.drawer.lead.contact_name }} · {{ S.drawer.lead.contact_email }}</div>
+          <!-- E-mails do fluxo pós-pagamento que ficaram como rascunho. No cabeçalho, e não
+               numa aba, porque pedido ganho abre direto na Timeline. -->
+          <div v-if="S.drawer.lead.fluxo_rascunhos && canArea('admin')" class="flex gap wrap" style="margin-top:8px;align-items:center">
+            <button class="btn btn-sm" @click="reenviarFluxo" title="Depois de corrigir o motivo (e-mail do fornecedor, book, modo do fluxo), manda de novo o que ficou como rascunho.">✉️ Reenviar e-mails do fluxo ({{ S.drawer.lead.fluxo_rascunhos }})</button>
+            <span class="small muted">O motivo de cada um está na Timeline.</span>
+          </div>
         </div>
         <button class="x-btn" @click="closeDrawer">✕</button>
       </div>

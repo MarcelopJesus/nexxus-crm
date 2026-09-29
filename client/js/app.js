@@ -49,7 +49,7 @@ const app = createApp({
       priceCalc: null, sendingProposal: false,
       propInput: { final_price:'', approve_below_floor:false }, closeForm:{ result:'', lost_reason:'' },
       noteInput: '', savingPrice:false,
-      newSupplier:{ name:'', country:'', currency:'USD' }, newProduct:{ supplier_id:'', name:'', sku:'', list_cost_usd:'' },
+      newSupplier:{ name:'', country:'', currency:'USD', email:'' }, newProduct:{ supplier_id:'', name:'', sku:'', list_cost_usd:'' },
       newUser:{ name:'', email:'', password:'senha123', area:'vendas', role:'user' },
       // SDR Agent
       sdr: { configured:false, model:'', agent_enabled:false, agent_off_reason:null },
@@ -488,6 +488,13 @@ const app = createApp({
     function closeDrawer(){ S.drawer = null; }
 
     async function triage(){ await API.post('/api/leads/' + S.drawer.lead.id + '/triage', {}); flash('Despachado para Compras.'); await refreshDrawer(); }
+    async function reenviarFluxo(){
+      const r = await API.post('/api/leads/' + S.drawer.lead.id + '/fluxo/reenviar', {});
+      if (!r.ok) return flash((r.data&&r.data.error&&r.data.error.message)||'Sem permissão.');
+      const res = (r.data.data.resultado||[]); const ok = res.filter(x=>x.enviado).length;
+      flash(ok + ' de ' + res.length + ' e-mail(s) enviados' + (ok<res.length ? ' — o resto continua como rascunho; veja o motivo na timeline.' : '.'));
+      await refreshDrawer();
+    }
     async function toggleHot(){ await API.post('/api/leads/' + S.drawer.lead.id + '/hot', {}); await refreshDrawer(); }
     async function addNote(){ if (!S.noteInput) return; await API.post('/api/activities', { lead_id:S.drawer.lead.id, message:S.noteInput }); S.noteInput=''; await refreshDrawer(); }
 
@@ -542,7 +549,11 @@ const app = createApp({
 
     // ---------- config / catalog / users ----------
     async function saveConfig(){ const r = await API.put('/api/config/pricing', S.config); if (r.ok){ S.config = r.data.data; flash('Regras de precificação salvas.'); } else flash((r.data&&r.data.error&&r.data.error.message)||'Sem permissão.'); }
-    async function addSupplier(){ if(!S.newSupplier.name)return; const r=await API.post('/api/suppliers', S.newSupplier); if(r.ok){ S.newSupplier={name:'',country:'',currency:'USD'}; await loadCatalog(); flash('Fornecedor adicionado.'); } }
+    async function addSupplier(){ if(!S.newSupplier.name)return; const r=await API.post('/api/suppliers', S.newSupplier); if(r.ok){ S.newSupplier={name:'',country:'',currency:'USD',email:''}; await loadCatalog(); flash('Fornecedor adicionado.'); } else flash((r.data&&r.data.error&&r.data.error.message)||'Não foi possível adicionar.'); }
+    // E-mail do fornecedor: para onde compras manda o pedido de compra, e o único remetente
+    // aceito na resposta com a chave. Link do book: vai no e-mail de entrega ao cliente.
+    async function saveSupplierEmail(s){ const r=await API.patch('/api/suppliers/'+s.id, { email:s.email||'' }); if(r.ok){ await loadCatalog(); flash('E-mail do fornecedor salvo.'); } else flash((r.data&&r.data.error&&r.data.error.message)||'Sem permissão.'); }
+    async function saveProductBook(p){ const r=await API.patch('/api/products/'+p.id, { book_url:p.book_url||'' }); if(r.ok){ await loadCatalog(); flash('Link do book salvo.'); } else flash((r.data&&r.data.error&&r.data.error.message)||'Sem permissão.'); }
     async function addProduct(){ if(!S.newProduct.name)return; const r=await API.post('/api/products', S.newProduct); if(r.ok){ S.newProduct={supplier_id:'',name:'',sku:'',list_cost_usd:''}; await loadCatalog(); flash('Produto adicionado.'); } }
     async function addUser(){ if(!S.newUser.name||!S.newUser.email)return; const r=await API.post('/api/users', S.newUser); if(r.ok){ S.newUser={name:'',email:'',password:'senha123',area:'vendas',role:'user'}; await loadUsers(); flash('Usuário criado.'); } else flash((r.data&&r.data.error&&r.data.error.message)||'Sem permissão.'); }
 
@@ -571,7 +582,7 @@ const app = createApp({
     return { S, route, go, stageLabel, colunasDoFunil, tramiteDoLead, totalDaColuna, podeSoltar, AREA_LABEL, BRL, PCT, initials, canArea, flash, fmtDT, fmtD,
       doLogin, logout, leadsByStage, onDragStart, onDrop, createLead, openLead, closeDrawer,
       triage, toggleHot, addNote, submitQuote, runPricing, savePricing, sendProposal, closeLead,
-      toggleTask, toggleTaskRow, updateContract, latestPricing, saveConfig, addSupplier, addProduct, addUser,
+      toggleTask, toggleTaskRow, updateContract, latestPricing, saveConfig, reenviarFluxo, addSupplier, saveSupplierEmail, saveProductBook, addProduct, addUser,
       loadReport, loadTasks, loadUsers, filteredContacts,
       loadNotifications, markNotifRead, dispensarPopup, propLink, propStatusLabel, copyText, copyProposal, openProposal, sendPropEmail, isOverdue, isToday, srcColor, barPct,
       channelLabel, originBadge,
