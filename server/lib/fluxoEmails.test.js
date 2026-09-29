@@ -284,6 +284,31 @@ test('resposta do fornecedor sem autenticação aprovada não fecha nada', async
   assert.equal(store.find('notifications', n => n.lead_id === id && n.type === 'fluxo_remetente').length, 2);
 });
 
+test('fabricante de dentro da organização (ensaio com o Ítalo): vale a marca interna da Microsoft', async () => {
+  const sup = store.insert('suppliers', { name: 'Fabricante Interno', currency: 'USD', email: 'italo.portes@nexxus.ia.br' });
+  store.insert('products', { name: 'Produto Interno', sku: 'teste-interno', supplier_id: sup.id, book_url: 'https://exemplo.com/b.pdf' });
+  process.env.FLUXO_EMAIL_PERMITIDOS += ',italo.portes@nexxus.ia.br';
+  const id = await pedidoPago('teste-interno');
+  assert.ok(enviados.some(e => e.to === 'italo.portes@nexxus.ia.br' && e.area === 'compras'));
+  const pc = codigoPC(id);
+  const interno = [
+    { name: 'Authentication-Results', value: 'dkim=none (message not signed) header.d=none;dmarc=none action=none header.from=nexxus.ia.br;' },
+    { name: 'X-MS-Exchange-Organization-AuthAs', value: 'Internal' },
+  ];
+  // Mesmo domínio, mas vindo de fora (sem a marca interna): recusado.
+  const deFora = await emailEntrando('italo.portes@nexxus.ia.br', `RE: ${pc}`, 'Chave de licença: INTE-0000-AAAA', [interno[0]]);
+  assert.equal(deFora.body.data.conferido, false);
+  enviados = [];
+  const r = await emailEntrando('italo.portes@nexxus.ia.br', `RE: ${pc}`, 'Chave de licença: INTE-1234-BBBB', interno);
+  assert.equal(r.body.data.conferido, true);
+  assert.equal(docs.achar(id, 'PV').status, docs.FECHADO);
+  // Domínio de fora com a marca "Internal" escrita à mão não passa.
+  const id2 = await pedidoPago('teste-fluxo');
+  const r2 = await emailEntrando('italo.fabricante@exemplo.com', `RE: ${codigoPC(id2)}`, 'Chave de licença: FORJ-0000-CCCC',
+    [{ name: 'Authentication-Results', value: 'dmarc=none action=none header.from=exemplo.com' }, { name: 'X-MS-Exchange-Organization-AuthAs', value: 'Internal' }]);
+  assert.equal(r2.body.data.conferido, false);
+});
+
 test('fatura antes da chave não é divergência: abre o FIN e espera', async () => {
   const id = await pedidoPago('teste-fluxo');
   const pc = codigoPC(id);

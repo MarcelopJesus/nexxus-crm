@@ -5,7 +5,7 @@ const { verifyPassword, sign, hashPassword } = require('./auth');
 const { getUsdBrl } = require('./fx');
 const { calculatePricing } = require('./pricing');
 const { sendEmail, isConfigured } = require('./mailer');
-const { ehCaixaPropria } = require('./caixasProprias');
+const { ehCaixaPropria, caixasProprias } = require('./caixasProprias');
 const sdr = require('./sdr');
 const catalog = require('./catalogSync');
 const faq = require('./faq');
@@ -787,7 +787,7 @@ async function processarEmailRecebido(body, req, opts = {}) {
       // sozinho não prova quem mandou (o endereço do fornecedor está no próprio pedido de
       // compra, e o número NXT-PC é sequencial): exige a autenticação aprovada pelo nosso
       // servidor de e-mail. Sem ela, fica para uma pessoa (revisão de 29/09).
-      const aut = autenticacaoDoFornecedor(d);
+      const aut = autenticacaoDoFornecedor(d, from);
       if (!aut.ok) {
         log(leadId, null, 'fluxo', `[compras] E-mail de ${from} citando pedido de compra NÃO foi processado: ${aut.razao}. Nada foi fechado.`);
         notify('fluxo_remetente', `Resposta de fornecedor sem autenticação confirmada (${aut.razao}) — confira à mão antes de entregar qualquer chave.`, leadId);
@@ -1741,16 +1741,32 @@ function ignorado(motivo) {
 // Vale o PRIMEIRO Authentication-Results da lista — é o que o nosso servidor (Microsoft)
 // carimbou ao receber. Os de baixo vieram com a mensagem e podem ter sido escritos por quem
 // forjou o e-mail; o cabecalhosDe, que guarda o último, não serve aqui.
-function autenticacaoDoFornecedor(d) {
+//
+// Exceção: e-mail de dentro da nossa própria organização (ex.: o Ítalo no papel de
+// fabricante no ensaio). A Microsoft não carimba DMARC em e-mail interno (vem dmarc=none),
+// mas marca X-MS-Exchange-Organization-AuthAs: Internal — cabeçalho que ela mesma remove
+// de qualquer e-mail vindo de fora, então não dá para forjar. Só vale para remetente do
+// domínio das nossas caixas.
+function primeiroCabecalho(d, nome) {
   const h = d && d.headers;
-  let ar = '';
   if (Array.isArray(h)) {
-    const primeiro = h.find(x => x && String(x.name || '').toLowerCase() === 'authentication-results');
-    ar = primeiro ? String(primeiro.value || '') : '';
-  } else if (h && typeof h === 'object') {
-    const k = Object.keys(h).find(n => n.toLowerCase() === 'authentication-results');
-    ar = k ? String(h[k] || '') : '';
+    const x = h.find(y => y && String(y.name || '').toLowerCase() === nome);
+    return x ? String(x.value || '') : '';
   }
+  if (h && typeof h === 'object') {
+    const k = Object.keys(h).find(n => n.toLowerCase() === nome);
+    return k ? String(h[k] || '') : '';
+  }
+  return '';
+}
+function autenticacaoDoFornecedor(d, from) {
+  const dominio = String(from || '').split('@').pop().toLowerCase();
+  const nossos = caixasProprias().map(c => c.split('@').pop());
+  if (dominio && nossos.includes(dominio)
+    && primeiroCabecalho(d, 'x-ms-exchange-organization-authas').trim().toLowerCase() === 'internal') {
+    return { ok:true, interno:true };
+  }
+  const ar = primeiroCabecalho(d, 'authentication-results');
   if (!ar) return { ok:false, razao:'sem Authentication-Results no e-mail' };
   const t = ar.toLowerCase();
   if (/\bdmarc=pass\b/.test(t)) return { ok:true };
