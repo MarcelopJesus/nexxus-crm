@@ -36,7 +36,7 @@ const app = createApp({
       // data
       meta: { stages: [], areas: [], users: [] },
       chatSessions: [],
-      negOpcao: null, negTexto: '', negAbaixoPiso: false, negEnviando: false,
+      negOpcao: null, negTexto: '', negAbaixoPiso: false, negEnviando: false, coraSel: {}, coraEnviando: null,
       fx: { rate: null, source: '', ts: 0 },
       leads: [], accounts: [], contacts: [], suppliers: [], products: [], tasks: [], users: [],
       config: null, report: null,
@@ -495,6 +495,28 @@ const app = createApp({
       flash(ok + ' de ' + res.length + ' e-mail(s) enviados' + (ok<res.length ? ' — o resto continua como rascunho; veja o motivo na timeline.' : '.'));
       await refreshDrawer();
     }
+    // ---------- Cora: três respostas ao fornecedor esperando escolha (30/09) ----------
+    // Uma escolha por pendência (um pedido de compra pode ter a sua), guardada por id.
+    function escolherCora(reg, i){ S.coraSel = Object.assign({}, S.coraSel, { [reg.id]: { indice:i, texto: reg.opcoes[i].body } }); }
+    async function enviarCora(reg){
+      const sel = S.coraSel[reg.id];
+      if (!sel) { flash('Escolha uma das três respostas.'); return; }
+      S.coraEnviando = reg.id;
+      const r = await API.post('/api/leads/' + S.drawer.lead.id + '/fornecedor/' + reg.id + '/responder', { indice: sel.indice, texto: sel.texto });
+      S.coraEnviando = null;
+      if (!r.ok) { flash((r.data && r.data.error && r.data.error.message) || 'Erro ao responder.'); return; }
+      if (r.data.data.send_failed) { flash('⚠️ O e-mail NÃO saiu (' + r.data.data.send_failed + '). Nada foi alterado — tente de novo.'); return; }
+      flash('A Cora respondeu ao fornecedor.');
+      const resto = Object.assign({}, S.coraSel); delete resto[reg.id]; S.coraSel = resto;
+      await refreshDrawer();
+    }
+    async function descartarCora(reg){
+      if (!confirm('Descartar as três respostas? O fornecedor fica sem resposta pelo CRM.')) return;
+      const r = await API.post('/api/leads/' + S.drawer.lead.id + '/fornecedor/' + reg.id + '/descartar', {});
+      if (!r.ok) { flash((r.data && r.data.error && r.data.error.message) || 'Erro ao descartar.'); return; }
+      flash('Respostas descartadas.');
+      await refreshDrawer();
+    }
     async function toggleHot(){ await API.post('/api/leads/' + S.drawer.lead.id + '/hot', {}); await refreshDrawer(); }
     async function addNote(){ if (!S.noteInput) return; await API.post('/api/activities', { lead_id:S.drawer.lead.id, message:S.noteInput }); S.noteInput=''; await refreshDrawer(); }
 
@@ -582,7 +604,7 @@ const app = createApp({
     return { S, route, go, stageLabel, colunasDoFunil, tramiteDoLead, totalDaColuna, podeSoltar, AREA_LABEL, BRL, PCT, initials, canArea, flash, fmtDT, fmtD,
       doLogin, logout, leadsByStage, onDragStart, onDrop, createLead, openLead, closeDrawer,
       triage, toggleHot, addNote, submitQuote, runPricing, savePricing, sendProposal, closeLead,
-      toggleTask, toggleTaskRow, updateContract, latestPricing, saveConfig, reenviarFluxo, addSupplier, saveSupplierEmail, saveProductBook, addProduct, addUser,
+      toggleTask, toggleTaskRow, updateContract, latestPricing, saveConfig, reenviarFluxo, escolherCora, enviarCora, descartarCora, addSupplier, saveSupplierEmail, saveProductBook, addProduct, addUser,
       loadReport, loadTasks, loadUsers, filteredContacts,
       loadNotifications, markNotifRead, dispensarPopup, propLink, propStatusLabel, copyText, copyProposal, openProposal, sendPropEmail, isOverdue, isToday, srcColor, barPct,
       channelLabel, originBadge,

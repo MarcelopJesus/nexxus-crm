@@ -686,7 +686,9 @@ function aoReceberDoFornecedor(deps, leadId, entrada) {
   const texto = semCitacao((entrada && entrada.texto) || '');
   const chave = extrairChave(texto);
 
-  registrar(deps, leadId, 'fornecedor_devolve', chave ? 'chave recebida' : 'sem chave reconhecível no e-mail');
+  // Sem chave, a frase da etapa ("devolveu a chave e a fatura") mentiria na timeline.
+  if (chave) registrar(deps, leadId, 'fornecedor_devolve', 'chave recebida');
+  else deps.log(leadId, null, 'fluxo', `[compras] O fornecedor respondeu ${pc.codigo} sem uma chave de licença reconhecível.`);
 
   // A fatura abre o ciclo financeiro, que corre por fora e não segura a entrega.
   if (pareceFatura(texto)) {
@@ -706,7 +708,10 @@ function aoReceberDoFornecedor(deps, leadId, entrada) {
   if (!conferencia.ok) {
     deps.log(leadId, null, 'fluxo', `[compras] Conferência REPROVADA: ${conferencia.problemas.join('; ')}. Nada foi entregue ao cliente.`);
     deps.notify('fluxo_divergencia', `Pedido ${pc.codigo}: o que o fornecedor mandou não bate — ${conferencia.problemas.join('; ')}.`, leadId);
-    return { ok: false, razao: 'divergência na conferência', problemas: conferencia.problemas, chave: null };
+    // `pedirResposta`: quem chamou (api.js) põe a Cora para ler o e-mail e sugerir três
+    // respostas ao fornecedor — o pedido não pode morrer aqui em silêncio.
+    return { ok: false, razao: 'divergência na conferência', problemas: conferencia.problemas, chave: null,
+      pedirResposta: true, pc, texto };
   }
   registrar(deps, leadId, 'compras_confere', 'quantidade, produto e número conferem');
 
@@ -721,7 +726,7 @@ function aoReceberDoFornecedor(deps, leadId, entrada) {
   if (!ligado()) {
     deps.log(leadId, null, 'email_rascunho', `Para o cliente — ${entrega.assunto}\n\nChave de licença registrada. Falta anexar o book de instalação e enviar pela caixa @vendas.`);
     deps.notify('fluxo_entrega', `Pedido ${pc.codigo} conferido: chave pronta para ir ao cliente. Nada foi enviado (FLUXO_POS_PAGAMENTO desligado).`, leadId);
-    return { ok: true, chave, entrega, envios: [], pvFechado: false };
+    return { ok: true, chave, entrega, envios: [], pvFechado: false, pc };
   }
 
   // Freio ligado: compras avisa vendas (interno) e vendas entrega ao cliente. A entrega é
@@ -734,7 +739,7 @@ function aoReceberDoFornecedor(deps, leadId, entrada) {
     { etapa: 'vendas_entrega', tipo: 'entrega', pc_sku: pc.sku || null, area: 'vendas', para: emailCliente, destino: 'cliente',
       assunto: entrega.assunto, corpo: '', codigo: pc.codigo, semEndereco: 'o cliente não tem e-mail cadastrado' },
   ]);
-  return { ok: true, chave, entrega, envios, pvFechado: false };
+  return { ok: true, chave, entrega, envios, pvFechado: false, pc };
 }
 
 /**
@@ -751,4 +756,4 @@ function confirmarEntregaAoCliente(deps, leadId, prova, sku) {
 }
 
 module.exports = { ETAPAS, etapa, modo, ligado, motivoParaNaoEnviar, despachar, enfileirar, retomarPendentes, paraReenviar, registrar, itensDoLead, escolherPC, conferir, textoPedidoDeCompra, aoConfirmarPagamento,
-  extrairChave, candidatosDeChave, pareceFatura, semCitacao, aoReceberDoFornecedor, confirmarEntregaAoCliente, remetenteEhDoFornecedor };
+  extrairChave, candidatosDeChave, pareceFatura, semCitacao, paraHtml, aoReceberDoFornecedor, confirmarEntregaAoCliente, remetenteEhDoFornecedor };

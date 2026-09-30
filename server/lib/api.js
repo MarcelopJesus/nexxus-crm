@@ -12,6 +12,7 @@ const faq = require('./faq');
 const docnum = require('./docnum');
 const documentos = require('./documentos');
 const fluxo = require('./fluxoPedido');
+const cora = require('./coraRespostas');
 const S = store; // alias
 
 const STAGES = [
@@ -449,12 +450,26 @@ function despacharFluxo(leadId, envios) {
 }
 // Ao subir o servidor: retoma o que um deploy interrompeu (ver fluxoPedido.retomarPendentes).
 function retomarFluxoPendente() {
+  cora.destravarInterrompidas();
   const grupos = fluxo.retomarPendentes({ log, notify });
   for (const g of grupos) despacharFluxo(g.leadId, g.registros);
   return grupos.length;
 }
 async function aguardarDespachosDoFluxo() {
   while (despachosDoFluxo.size) await Promise.all([...despachosDoFluxo]);
+}
+
+// Resposta do fornecedor sem a chave: a Cora lê e prepara três respostas (coraRespostas.js).
+// A IA leva segundos — não segura a leitura da caixa; entra na mesma lista de espera.
+function sugerirRespostaAoFornecedor(leadId, ctx) {
+  const p = cora.sugerir({ log, notify }, Object.assign({ leadId }, ctx))
+    .catch(e => {
+      console.error(`[fluxo] Cora não conseguiu preparar respostas no lead #${leadId}: ${e.message}`);
+      notify('fluxo_divergencia', `O fornecedor respondeu sem a chave e a Cora não conseguiu preparar as respostas (${e.message}). Responda à mão.`, leadId);
+    })
+    .finally(() => despachosDoFluxo.delete(p));
+  despachosDoFluxo.add(p);
+  return p;
 }
 
 // M28 — "e-mail in" com resumo da IA. O evento na timeline precisa dizer O QUE o cliente
@@ -559,6 +574,8 @@ function leadWithJoins(id) {
     // E-mails do fluxo pós-pagamento que ficaram como rascunho — é o que acende o botão
     // "Reenviar e-mails do fluxo" no card.
     fluxo_rascunhos: S.find('fluxo_envios', r => r.lead_id === l.id && r.status === 'rascunho').length,
+    // Respostas que a Cora preparou para o fornecedor, esperando um humano escolher.
+    respostas_fornecedor: cora.pendentesDoLead(l.id),
     // Os códigos são derivados do sequencial na saída, nunca guardados prontos: assim OP,
     // PV e PC não têm como divergir entre si nem ficar velhos quando o SKU muda.
     doc: docnum.codigosDoLead(l),
@@ -799,6 +816,8 @@ async function processarEmailRecebido(body, req, opts = {}) {
       const skus = [...new Set(pcsCitados.map(c => c.sku).filter(Boolean))];
       const r = fluxo.aoReceberDoFornecedor({ log, notify }, leadId, { texto, from, skus });
       despacharFluxo(leadId, r.envios);
+      if (r.ok && r.pc) cora.encerrarPorChave(leadId, r.pc.codigo);
+      if (r.pedirResposta) sugerirRespostaAoFornecedor(leadId, { pc:r.pc, from, assunto, texto:r.texto, problemas:r.problemas });
       return { status:200, body:{ success:true, data:{ lead_id:leadId, fornecedor:true,
         conferido:r.ok, problemas:r.problemas || null } } };
     }
@@ -1594,6 +1613,22 @@ async function handle(req) {
     const email = emailDeFornecedor(body.email);
     if (email === false) return badRequest('E-mail do fornecedor inválido.');
     return { status:201, body:{ success:true, data: S.insert('suppliers', { name:body.name, country:body.country||null, currency:body.currency||'USD', email }) } };
+  }
+  // ---- Cora: um humano escolhe uma das três respostas ao fornecedor (30/09) ----
+  if ((m=P(/^\/api\/leads\/(\d+)\/fornecedor\/(\d+)\/(responder|descartar)$/)) && method==='POST') {
+    if (!canArea(user,'compras')) return forbidden('Apenas Admin ou Compras responde ao fornecedor.');
+    const o = { leadId:+m[1], id:+m[2], indice:body.indice, texto:body.texto, userId:user.id, userName:user.name };
+    if (m[3] === 'descartar') {
+      const r = cora.descartar({ log }, o);
+      if (r.naoPendente) return { status:404, body:{ success:false, error:{ message:'Essas respostas não estão mais pendentes.' } } };
+      return { status:200, body:{ success:true, data:{ ok:true } } };
+    }
+    const r = await cora.responder({ log, enviar: sendEmail, logEmailOut }, o);
+    if (r.naoPendente) return { status:404, body:{ success:false, error:{ message:'Essas respostas não estão mais pendentes — atualize o card.' } } };
+    if (r.semOpcao) return badRequest('Escolha uma das três respostas.');
+    if (r.bloqueado) return { status:409, body:{ success:false, error:{ message:'O e-mail não pode sair: ' + r.bloqueado + '.' } } };
+    if (r.falhou) return { status:200, body:{ success:true, data:{ send_failed:r.falhou } } };
+    return { status:200, body:{ success:true, data:{ sent:true } } };
   }
   // Botão "Reenviar e-mails do fluxo": o que virou rascunho volta para a fila e sai de novo,
   // reavaliando tudo (freio, lista do modo teste, e-mail do fornecedor, book).
