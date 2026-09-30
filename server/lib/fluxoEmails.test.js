@@ -562,6 +562,15 @@ test('chave sem dois-pontos é lida; palavra de frase depois de "chave" não vir
   assert.equal(fluxo.extrairChave('Ola Cora\nSegue a chave 0891334.\n\nAnexo a Invoice para pagamento.'), '0891334');
   assert.equal(fluxo.extrairChave('license key ABCD-1234-EFGH'), 'ABCD-1234-EFGH');
   assert.equal(fluxo.extrairChave('A chave é XK99-1234-PLQ'), 'XK99-1234-PLQ');
+  // as variações que o Marcelo listou em 30/09, e outras comuns
+  assert.equal(fluxo.extrairChave('Licence key: LC99-1234-AAAA'), 'LC99-1234-AAAA');
+  assert.equal(fluxo.extrairChave('Segue a chave da licença 0891334'), '0891334');
+  assert.equal(fluxo.extrairChave('Chave do produto: PK12-3456-XYZ'), 'PK12-3456-XYZ');
+  assert.equal(fluxo.extrairChave('Sua licença: 7788-ABCD-9900'), '7788-ABCD-9900');
+  assert.equal(fluxo.extrairChave('Product key: WXYZ-1111-2222'), 'WXYZ-1111-2222');
+  assert.equal(fluxo.extrairChave('Serial number SN-00012345'), 'SN-00012345');
+  assert.equal(fluxo.extrairChave('Código de ativação: AT-5566-7788'), 'AT-5566-7788');
+  assert.equal(fluxo.extrairChave('Activation code 99887766'), '99887766');
   assert.equal(fluxo.extrairChave('a chave sai amanhã, sem falta'), null);
   assert.equal(fluxo.extrairChave('Chave de licença: Aguardamos o envio'), null);
   assert.equal(fluxo.extrairChave('Chave de licença: Por favor, envie a chave junto com os trials.'), null);

@@ -503,7 +503,7 @@ function paraReenviar(leadId) {
 // 30/09 — o CRM exigia "chave:" e o pedido travou com a chave na mão). Sem dois-pontos, o
 // que vem depois só vale se PARECER chave (ver pareceChave), senão "a chave sai amanhã"
 // virava a chave "sai".
-const RE_ROTULO = /(?:chave(?:\s+de\s+licen[çc]a)?|licen[çc]a|license\s*key|serial|activation\s*key)(?:\s*[:\-–]\s*|\s+(?:(?:[ée]|is)\s*:?\s+)?)/gi;
+const RE_ROTULO = /(?:chave(?:\s+d[aeo]\s+(?:licen[çc]a|ativa[çc][ãa]o|produto))?|licen[çc]a|licen[cs]e\s*key|product\s*key|serial(?:\s*number)?|activation\s*(?:key|code)|c[óo]digo\s+de\s+ativa[çc][ãa]o)(?:\s*[:\-–]\s*|\s+(?:(?:[ée]|is)\s*:?\s+)?)/gi;
 
 // Chave tem dígito, ou é toda em maiúsculas (ABCDEF-GHIJKL). Palavra de frase não passa —
 // nem "Chave de licença: Aguardamos", nem "a chave enviaremos amanhã".
