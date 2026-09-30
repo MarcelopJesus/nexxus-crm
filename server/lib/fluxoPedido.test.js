@@ -317,6 +317,24 @@ test('rodapé jurídico não abre ciclo financeiro', () => {
   assert.equal(fluxo.pareceFatura('Segue a fatura em anexo'), true);
 });
 
+test('o nosso pedido citado na resposta não abre ciclo financeiro (ensaio de 29/09)', () => {
+  // A resposta real do Ítalo no Outlook para iOS: chave em cima, nosso pedido citado embaixo.
+  const resposta = '\r\nChave de licença: TESTE-1234-ABCD-5678\r\n\r\nObter o Outlook para iOS<https://aka.ms/o0ukef>\r\n'
+    + '________________________________\r\nDe: Cora Compras <cora.compras@nexxus.ia.br>\r\n'
+    + 'Enviado: Tuesday, 29 September 2026 19:21:31\r\nPara: Italo Portes <italo.portes@nexxus.ia.br>\r\n'
+    + 'Assunto: Pedido de compra NXT-PC-0003-TESTEFLUXO\r\n\r\nOlá, Segue nosso pedido de compra. '
+    + '• a chave de licença, para este endereço (compras); • a fatura, para o nosso e-mail financeiro. Obrigado, Nexxus Tech\r\n';
+  const limpo = fluxo.semCitacao(resposta);
+  assert.equal(fluxo.pareceFatura(limpo), false);
+  assert.equal(fluxo.extrairChave(limpo), 'TESTE-1234-ABCD-5678');
+  // os outros formatos de citação também são cortados
+  assert.equal(fluxo.pareceFatura(fluxo.semCitacao('ok\n\nEm ter., 29 de set. de 2026 às 19:21, Cora escreveu:\n> segue a fatura')), false);
+  assert.equal(fluxo.pareceFatura(fluxo.semCitacao('ok\n-----Original Message-----\nFrom: Cora\ninvoice')), false);
+  assert.equal(fluxo.pareceFatura(fluxo.semCitacao('ok\nFrom: Cora <c@x.com>\nSent: Tuesday\nSubject: x\n\ninvoice')), false);
+  // fatura escrita pelo fornecedor, acima da citação, continua valendo
+  assert.equal(fluxo.pareceFatura(fluxo.semCitacao('Segue a fatura em anexo.\n________________________________\nDe: Cora\nEnviado: hoje')), true);
+});
+
 test('configurar só as caixas novas não derruba o envio', () => {
   const mailer = require('./mailer');
   const antesFrom = process.env.EMAIL_FROM, antesKey = process.env.EMAIL_API_KEY;
