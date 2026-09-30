@@ -21,24 +21,27 @@ process.env.FLUXO_EMAIL_PERMITIDOS = 'cliente.teste@exemplo.com, Italo <italo.fa
 process.env.EMAIL_FROM = 'Patrícia <patricia.atendimento@nexxus.ia.br>';
 process.env.EMAIL_FROM_VENDAS = 'Veridiana | Vendas <veridiana.vendas@nexxus.ia.br>';
 process.env.EMAIL_FROM_COMPRAS = 'cora.compras@nexxus.ia.br';
+process.env.EMAIL_FROM_FINANCEIRO = 'fred.financeiro@nexxus.ia.br';
 const SEGREDO_BRUTO = crypto.randomBytes(24).toString('base64');
 process.env.EMAIL_WEBHOOK_SECRET = 'whsec_' + SEGREDO_BRUTO;
 process.env.EMAIL_INBOUND_ADDRESS = 'patricia.atendimento@nexxus.ia.br';
 
 // Mailer falso: registra cada envio e deixa o teste escolher a resposta do provedor.
 let enviados = [];
+let encaminhados = [];
 let respostaDoProvedor = () => ({ sent: true, status: 202, id: 'msg-' + (enviados.length) });
 const mailerPath = require.resolve('./mailer');
 require.cache[mailerPath] = {
   id: mailerPath, filename: mailerPath, loaded: true,
   exports: {
     sendEmail: async (m) => { enviados.push(m); return respostaDoProvedor(m); },
+    encaminharPorGraph: async (m) => { encaminhados.push(m); return { sent: true, status: 202, id: null }; },
     isConfigured: () => true,
     remetenteDe: (a) => a === 'compras' ? process.env.EMAIL_FROM_COMPRAS : process.env.EMAIL_FROM_VENDAS,
     caixasConfiguradas: () => ({
       vendas: { propria: true, endereco: process.env.EMAIL_FROM_VENDAS },
       compras: { propria: true, endereco: process.env.EMAIL_FROM_COMPRAS },
-      financeiro: { propria: false, endereco: null },
+      financeiro: { propria: true, endereco: 'fred.financeiro@nexxus.ia.br' },
     }),
     CAIXAS: {}, HEADERS_AUTOMATICO: {},
   },
@@ -72,6 +75,7 @@ seedIfEmpty();
 after(async () => { await new Promise(r => setTimeout(r, 60)); try { fs.unlinkSync(DB_FILE); } catch {} });
 beforeEach(() => {
   enviados = [];
+  encaminhados = [];
   respostaDoProvedor = () => ({ sent: true, status: 202, id: 'msg-' + enviados.length });
 });
 
@@ -543,4 +547,65 @@ test('Cora: provedor recusa o envio — a pendência continua para tentar de nov
   const r = await handle({ method: 'POST', path: `/api/leads/${id}/fornecedor/${reg.id}/responder`, user: admin, headers: {}, query: {}, body: { indice: 0 } });
   assert.equal(r.body.data.send_failed, 'caixa indisponível');
   assert.equal(store.get('respostas_fornecedor', reg.id).status, 'pendente');
+});
+
+// ---- 3º ensaio (30/09): "Segue a chave 0891334" + invoice em anexo, na caixa da Cora ----
+// Como o leitor do Outlook entrega: caixa própria, com o id do Graph e a marca de anexo.
+async function emailNaCaixa(caixa, from, subject, text, extra) {
+  const r = await api.processarEmailRecebido({ type: 'email.received', data: Object.assign(
+    { from, to: [caixa], subject, text, html: '', headers: AUTENTICADO }, extra || {}) }, null, { caixaPropria: true });
+  await api.aguardarDespachosDoFluxo();
+  return r;
+}
+
+test('chave sem dois-pontos é lida; palavra de frase depois de "chave" não vira chave', () => {
+  assert.equal(fluxo.extrairChave('Ola Cora\nSegue a chave 0891334.\n\nAnexo a Invoice para pagamento.'), '0891334');
+  assert.equal(fluxo.extrairChave('license key ABCD-1234-EFGH'), 'ABCD-1234-EFGH');
+  assert.equal(fluxo.extrairChave('A chave é XK99-1234-PLQ'), 'XK99-1234-PLQ');
+  assert.equal(fluxo.extrairChave('a chave sai amanhã, sem falta'), null);
+  assert.equal(fluxo.extrairChave('Chave de licença: Aguardamos o envio'), null);
+  assert.equal(fluxo.extrairChave('Chave de licença: Por favor, envie a chave junto com os trials.'), null);
+  assert.equal(fluxo.extrairChave('mandamos a chave de licença para este endereço'), null);
+});
+
+test('chave + invoice na caixa da Cora: segue para vendas e cliente, e a fatura vai ao Fred com o anexo', async () => {
+  respostaIA = TRES;
+  const id = await pedidoPago('teste-fluxo');
+  const pc = codigoPC(id);
+  enviados = []; encaminhados = [];
+  await emailNaCaixa('cora.compras@nexxus.ia.br', 'italo.fabricante@exemplo.com', `Re: ENC: Pedido de compra ${pc}`,
+    'Ola Cora\r\nSegue a chave 0891334.\r\n\r\nAnexo a Invoice para pagamento.\r\n\r\nAbs\r\n\r\nDe: Cora Compras <cora.compras@nexxus.ia.br>\r\nData: hoje\r\n\r\nChave de licença: Por favor, envie a chave',
+    { graph_id: 'AAMk-ensaio-3', anexos: true });
+  assert.equal(docs.achar(id, 'PC').status, docs.FECHADO);
+  assert.equal(docs.achar(id, 'PV').status, docs.FECHADO);
+  assert.deepEqual(enviados.map(e => e.to), ['veridiana.vendas@nexxus.ia.br', 'cliente.teste@exemplo.com']);
+  assert.match(enviados[1].html, /0891334/);
+  assert.ok(docs.achar(id, 'FIN'), 'a invoice abre o ciclo financeiro');
+  assert.equal(encaminhados.length, 1);
+  assert.equal(encaminhados[0].caixa, 'cora.compras@nexxus.ia.br');
+  assert.equal(encaminhados[0].messageId, 'AAMk-ensaio-3', 'encaminha a mensagem original — o anexo vai junto');
+  assert.equal(encaminhados[0].para, 'fred.financeiro@nexxus.ia.br');
+  assert.match(atividades(id, 'fluxo').map(a => a.message).join('\n'), /Cora encaminhou a fatura .* ao financeiro .*com o anexo/);
+  assert.equal(pendentesCora(id).length, 0);
+});
+
+test('só a invoice, sem chave, na caixa da Cora: encaminha ao Fred e a Cora prepara a cobrança da chave', async () => {
+  respostaIA = TRES;
+  const id = await pedidoPago('teste-fluxo');
+  const pc = codigoPC(id);
+  enviados = []; encaminhados = [];
+  await emailNaCaixa('cora.compras@nexxus.ia.br', 'italo.fabricante@exemplo.com', `Re: ${pc}`, 'Segue a invoice em anexo.', { graph_id: 'AAMk-2', anexos: true });
+  assert.equal(enviados.length, 0);
+  assert.equal(docs.achar(id, 'PC').status, docs.ABERTO);
+  assert.equal(encaminhados.length, 1);
+  assert.equal(pendentesCora(id).length, 1, 'alguém precisa cobrar a chave');
+});
+
+test('invoice que chega direto na caixa do Fred não é encaminhada de novo', async () => {
+  respostaIA = TRES;
+  const id = await pedidoPago('teste-fluxo');
+  encaminhados = [];
+  await emailNaCaixa('fred.financeiro@nexxus.ia.br', 'italo.fabricante@exemplo.com', `Invoice ${codigoPC(id)}`, 'Segue a invoice.', { graph_id: 'AAMk-3', anexos: true });
+  assert.equal(encaminhados.length, 0);
+  assert.ok(docs.achar(id, 'FIN'));
 });

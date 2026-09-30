@@ -144,6 +144,22 @@ async function enviarPorGraph({ from, to, subject, html, replyTo, cabecalhos }) 
   return { sent: true, status: envio.status, id };
 }
 
+// Encaminha um e-mail que CHEGOU numa caixa nossa, com os anexos (a fatura em PDF, por
+// exemplo). É o "Encaminhar" do Outlook: a mensagem original vai inteira, com o comentário
+// em cima, e fica nos enviados da caixa. O Graph responde 202 sem corpo — sem Message-ID.
+async function encaminharPorGraph({ caixa, messageId, para, comentario }) {
+  if (provedor() !== 'graph') return { sent: false, reason: 'encaminhar exige EMAIL_PROVIDER=graph' };
+  const token = await obterTokenGraph();
+  const base = `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(enderecoDe(caixa))}`;
+  const res = await fetch(`${base}/messages/${encodeURIComponent(messageId)}/forward`, {
+    method: 'POST',
+    headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ comment: comentario || '', toRecipients: [{ emailAddress: { address: enderecoDe(para) } }] }),
+  });
+  if (!res.ok) return { sent: false, status: res.status, reason: await motivoGraph(res) };
+  return { sent: true, status: res.status, id: null };
+}
+
 async function motivoGraph(res) {
   try { const j = await res.json(); return (j.error && (j.error.code + ': ' + j.error.message)) || String(res.status); }
   catch (e) { return String(res.status); }
@@ -191,5 +207,5 @@ async function sendEmail({ to, subject, html, headers, replyTo, area }) {
 
 function _zerarTokenGraph() { tokenGraph = null; }   // só para os testes
 
-module.exports = { sendEmail, isConfigured, remetenteDe, caixasConfiguradas, caixasProprias, ehCaixaPropria, CAIXAS, HEADERS_AUTOMATICO,
+module.exports = { sendEmail, encaminharPorGraph, isConfigured, remetenteDe, caixasConfiguradas, caixasProprias, ehCaixaPropria, CAIXAS, HEADERS_AUTOMATICO,
   provedor, credenciaisGraph, obterTokenGraph, _zerarTokenGraph };

@@ -499,7 +499,17 @@ function paraReenviar(leadId) {
 //     duas linhas ou com marcação HTML no meio virava metade da chave
 //   - duas chaves no mesmo e-mail ("key: VELHA (cancelada). Replacement key: NOVA") NÃO
 //     podem ser resolvidas no chute: viram ambiguidade
-const RE_ROTULO = /(?:chave(?:\s+de\s+licen[çc]a)?|licen[çc]a|license\s*key|serial|activation\s*key)\s*[:\-–]\s*/gi;
+// O separador pode faltar: gente de verdade escreve "Segue a chave 0891334" (ensaio de
+// 30/09 — o CRM exigia "chave:" e o pedido travou com a chave na mão). Sem dois-pontos, o
+// que vem depois só vale se PARECER chave (ver pareceChave), senão "a chave sai amanhã"
+// virava a chave "sai".
+const RE_ROTULO = /(?:chave(?:\s+de\s+licen[çc]a)?|licen[çc]a|license\s*key|serial|activation\s*key)(?:\s*[:\-–]\s*|\s+(?:(?:[ée]|is)\s*:?\s+)?)/gi;
+
+// Chave tem dígito, ou é toda em maiúsculas (ABCDEF-GHIJKL). Palavra de frase não passa —
+// nem "Chave de licença: Aguardamos", nem "a chave enviaremos amanhã".
+function pareceChave(c) {
+  return c.length >= 6 && (/\d/.test(c) || !/[a-z]/.test(c));
+}
 
 // Limpa marcação e junta o que a formatação partiu, antes de procurar a chave.
 function normalizaCorpo(texto) {
@@ -545,7 +555,7 @@ function candidatosDeChave(texto) {
       else break;
     }
     const chave = partes.join('').replace(/[.\-_]+$/, '');
-    if (chave.length >= 6) achados.push(chave);
+    if (pareceChave(chave)) achados.push(chave);
   }
   return [...new Set(achados)];
 }
@@ -691,16 +701,20 @@ function aoReceberDoFornecedor(deps, leadId, entrada) {
   else deps.log(leadId, null, 'fluxo', `[compras] O fornecedor respondeu ${pc.codigo} sem uma chave de licença reconhecível.`);
 
   // A fatura abre o ciclo financeiro, que corre por fora e não segura a entrega.
-  if (pareceFatura(texto)) {
+  const fatura = pareceFatura(texto);
+  if (fatura) {
     const fin = documentos.abrir(leadId, 'FIN', null, pc.sku || null);
     deps.log(leadId, null, 'doc', `Ciclo financeiro ${fin.codigo} aberto — fatura do fornecedor recebida. Fecha quando for paga e o comprovante voltar.`);
   }
 
   // Fatura que chega antes da chave (a caixa do financeiro também é lida) não é
   // divergência: o FIN já foi aberto acima, e a chave ainda vai chegar.
-  if (!chave && pareceFatura(texto)) {
+  // Mas a Cora ainda prepara respostas: se a fatura veio na conversa com ela e a chave não,
+  // alguém precisa cobrar (ensaio de 30/09). Se a chave chegar logo depois, a pendência some.
+  if (!chave && fatura) {
     deps.log(leadId, null, 'fluxo', `[compras] Fatura de ${pc.codigo} recebida antes da chave — aguardando a chave do fornecedor.`);
-    return { ok: false, razao: 'só a fatura, sem chave ainda', fatura: true, chave: null, envios: [] };
+    return { ok: false, razao: 'só a fatura, sem chave ainda', fatura: true, chave: null, envios: [],
+      pedirResposta: true, pc, texto, problemas: ['veio a fatura, mas não veio a chave de licença'] };
   }
 
   // Etapa 6: o double-check. Divergência PARA aqui e chama gente — não entrega, não fecha.
@@ -711,7 +725,7 @@ function aoReceberDoFornecedor(deps, leadId, entrada) {
     // `pedirResposta`: quem chamou (api.js) põe a Cora para ler o e-mail e sugerir três
     // respostas ao fornecedor — o pedido não pode morrer aqui em silêncio.
     return { ok: false, razao: 'divergência na conferência', problemas: conferencia.problemas, chave: null,
-      pedirResposta: true, pc, texto };
+      pedirResposta: true, pc, texto, fatura };
   }
   registrar(deps, leadId, 'compras_confere', 'quantidade, produto e número conferem');
 
@@ -726,7 +740,7 @@ function aoReceberDoFornecedor(deps, leadId, entrada) {
   if (!ligado()) {
     deps.log(leadId, null, 'email_rascunho', `Para o cliente — ${entrega.assunto}\n\nChave de licença registrada. Falta anexar o book de instalação e enviar pela caixa @vendas.`);
     deps.notify('fluxo_entrega', `Pedido ${pc.codigo} conferido: chave pronta para ir ao cliente. Nada foi enviado (FLUXO_POS_PAGAMENTO desligado).`, leadId);
-    return { ok: true, chave, entrega, envios: [], pvFechado: false, pc };
+    return { ok: true, chave, entrega, envios: [], pvFechado: false, pc, fatura };
   }
 
   // Freio ligado: compras avisa vendas (interno) e vendas entrega ao cliente. A entrega é
@@ -739,7 +753,7 @@ function aoReceberDoFornecedor(deps, leadId, entrada) {
     { etapa: 'vendas_entrega', tipo: 'entrega', pc_sku: pc.sku || null, area: 'vendas', para: emailCliente, destino: 'cliente',
       assunto: entrega.assunto, corpo: '', codigo: pc.codigo, semEndereco: 'o cliente não tem e-mail cadastrado' },
   ]);
-  return { ok: true, chave, entrega, envios, pvFechado: false, pc };
+  return { ok: true, chave, entrega, envios, pvFechado: false, pc, fatura };
 }
 
 /**
