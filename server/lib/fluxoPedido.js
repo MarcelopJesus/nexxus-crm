@@ -146,6 +146,9 @@ function textoPedidoDeCompra(lead, produto, fornecedor, item) {
   const pc = Number.isInteger(seq) && seq > 0 ? docnum.formatar('PC', seq, it.sku) : '(sem número)';
   const nomeProduto = (produto && produto.name) || it.nome || lead.requested_software || 'licença';
   const qtd = Number(it.qty || 1);
+  // O fornecedor precisa saber para ONDE mandar a fatura: é a caixa do financeiro (Fred),
+  // que o CRM também lê e onde a fatura abre o NXT-FIN.
+  const financeiro = caixaDe('financeiro');
   const assunto = `Pedido de compra ${pc} — ${qtd} licença(s) de ${nomeProduto}`;
   const corpo = [
     `Olá${fornecedor && fornecedor.name ? ', ' + fornecedor.name : ''},`,
@@ -158,7 +161,7 @@ function textoPedidoDeCompra(lead, produto, fornecedor, item) {
     ``,
     `Pedimos a gentileza de responder com:`,
     `  • a chave de licença, para este endereço (compras);`,
-    `  • a fatura, para o nosso e-mail financeiro.`,
+    financeiro ? `  • a fatura, para o nosso financeiro: ${financeiro}` : `  • a fatura, para o nosso e-mail financeiro.`,
     ``,
     `Por favor, cite o número ${pc} na resposta — é por ele que conciliamos o pedido.`,
     ``,
@@ -346,8 +349,10 @@ function caixaDe(area) {
 function escapaHtml(t) {
   return String(t).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
+// Quebra de linha vira <br> de verdade: o Outlook ignora o white-space:pre-wrap e emendava
+// o e-mail inteiro num parágrafo só (visto no ensaio de 29/09).
 function paraHtml(texto) {
-  return `<div style="font-family:Arial,Helvetica,sans-serif;font-size:14px;line-height:1.5;white-space:pre-wrap">${escapaHtml(texto)}</div>`;
+  return `<div style="font-family:Arial,Helvetica,sans-serif;font-size:14px;line-height:1.5">${escapaHtml(texto).replace(/\r?\n/g, '<br>')}</div>`;
 }
 
 // ---- A fila de e-mails do fluxo ----
@@ -556,6 +561,27 @@ const SINAL_FATURA = /(fatura|invoice|nota\s*fiscal|boleto|cobran[çc]a)/i;
 // um ciclo financeiro do nada. Frase negada não conta.
 const NEGACAO_FATURA = /\b(n[ãa]o\s+(?:[a-zçãéêíóú]+\s+){0,3}(?:constitui|[ée]|ser[áa]|representa|vale\s+como)|sem)\s+(?:uma\s+)?(?:fatura|invoice|nota\s*fiscal|boleto|cobran[çc]a)/i;
 
+// Só o que o fornecedor escreveu, sem o nosso e-mail citado embaixo. No ensaio de 29/09 a
+// resposta do Ítalo trazia o pedido de compra inteiro citado ("…a fatura, para o nosso
+// e-mail financeiro"), e isso abriu um NXT-FIN sem fatura nenhuma. O código NXT-PC da
+// citação continua valendo para casar o pedido — isso é feito antes, no texto inteiro.
+const INICIO_CITACAO = [
+  /^_{5,}\s*$/m,                                                      // separador do Outlook
+  /^-{2,}\s*(?:original message|mensagem original|forwarded message|mensagem encaminhada)/im,
+  /^\s*(?:de|from)\s*:[^\n]*\n(?:[^\n]*\n){0,3}?\s*(?:enviad[oa](?: em)?|sent|data|date)\s*:/im,
+  /^\s*(?:em|on)\b[^\n]{0,200}(?:escreveu|wrote)\s*:?\s*$/im,
+];
+function semCitacao(texto) {
+  let t = normalizaCorpo(texto);
+  let corte = t.length;
+  for (const re of INICIO_CITACAO) {
+    const m = t.match(re);
+    if (m && m.index < corte) corte = m.index;
+  }
+  t = t.slice(0, corte);
+  return t.split('\n').filter(l => !/^\s*>/.test(l)).join('\n');
+}
+
 function pareceFatura(texto) {
   if (!texto) return false;
   const t = normalizaCorpo(texto);
@@ -657,7 +683,7 @@ function aoReceberDoFornecedor(deps, leadId, entrada) {
     return { ok: false, razao: quem.razao, remetenteRecusado: true };
   }
 
-  const texto = (entrada && entrada.texto) || '';
+  const texto = semCitacao((entrada && entrada.texto) || '');
   const chave = extrairChave(texto);
 
   registrar(deps, leadId, 'fornecedor_devolve', chave ? 'chave recebida' : 'sem chave reconhecível no e-mail');
@@ -725,4 +751,4 @@ function confirmarEntregaAoCliente(deps, leadId, prova, sku) {
 }
 
 module.exports = { ETAPAS, etapa, modo, ligado, motivoParaNaoEnviar, despachar, enfileirar, retomarPendentes, paraReenviar, registrar, itensDoLead, escolherPC, conferir, textoPedidoDeCompra, aoConfirmarPagamento,
-  extrairChave, candidatosDeChave, pareceFatura, aoReceberDoFornecedor, confirmarEntregaAoCliente, remetenteEhDoFornecedor };
+  extrairChave, candidatosDeChave, pareceFatura, semCitacao, aoReceberDoFornecedor, confirmarEntregaAoCliente, remetenteEhDoFornecedor };

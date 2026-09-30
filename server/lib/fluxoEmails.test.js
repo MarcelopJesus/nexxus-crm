@@ -124,6 +124,7 @@ test('pagamento confirmado: saem os três e-mails da ida, cada um pela caixa cer
   assert.equal(interno.to, 'cora.compras@nexxus.ia.br');
   assert.equal(interno.area, 'vendas');
   assert.match(interno.html, /Favor solicitar a licença/);
+  assert.match(aviso.html, /Obrigado pela compra!<br><br>/, 'cada linha do texto vira uma linha no Outlook');
 
   assert.equal(pedido.to, 'italo.fabricante@exemplo.com');
   assert.equal(pedido.area, 'compras');
