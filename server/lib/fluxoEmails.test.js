@@ -44,6 +44,23 @@ require.cache[mailerPath] = {
   },
 };
 
+// IA falsa para a Cora (30/09). Sem resposta definida ela falha — é o caminho das
+// respostas-padrão, e é o que os testes antigos (sem IA) continuam exercitando.
+let respostaIA = null;
+let chamadasIA = [];
+const llmPath = require.resolve('./llm');
+require.cache[llmPath] = {
+  id: llmPath, filename: llmPath, loaded: true,
+  exports: {
+    chatJSON: async (args) => {
+      chamadasIA.push(args);
+      if (!respostaIA) throw new Error('IA não configurada');
+      return typeof respostaIA === 'function' ? respostaIA(args) : respostaIA;
+    },
+    isConfigured: () => true, provider: () => 'stub', model: () => 'modelo-de-teste',
+  },
+};
+
 const store = require('./store');
 const { seedIfEmpty } = require('./seed');
 const docs = require('./documentos');
@@ -393,4 +410,137 @@ test('o link do book no produto só aceita https', async () => {
   assert.equal((await patch(admin, `/api/products/${prodComBook.id}`, { book_url: 'javascript:alert(1)' })).status, 400);
   assert.equal((await patch(admin, `/api/products/${prodComBook.id}`, { book_url: 'https://exemplo.com/b.pdf' })).status, 200);
   assert.equal(store.get('products', prodComBook.id).book_url, 'https://exemplo.com/b.pdf');
+});
+
+// ---- Cora: o fornecedor responde sem a chave (30/09) ----
+const TRES = {
+  resumo: 'O fornecedor oferece 2 trials da versão nova como bonificação e pergunta se aceitamos; a chave não veio.',
+  respostas: [
+    { titulo: 'Recusar e pedir a chave', body: 'Olá, agradecemos, mas não precisamos dos trials. Chave de licença: …' },
+    { titulo: 'Aceitar com a chave', body: 'Olá, aceitamos os 2 trials desde que a chave venha junto.' },
+    { titulo: 'Pedir detalhes', body: 'Olá, pode detalhar os trials?' },
+  ],
+};
+const BONIFICACAO = 'Ola Cora, posso te dar 2 trial da nova versão para bonificar o cliente, vc aceita?\n\n'
+  + 'De: Cora Compras <cora.compras@nexxus.ia.br>\nData: quarta-feira, 30 de setembro de 2026 às 07:39\n\nSegue nosso pedido.';
+const pendentesCora = (id) => store.find('respostas_fornecedor', r => r.lead_id === id && r.status === 'pendente');
+
+test('fornecedor pergunta em vez de mandar a chave: Cora prepara três respostas e não envia nada', async () => {
+  respostaIA = TRES; chamadasIA = [];
+  const id = await pedidoPago('teste-fluxo');
+  const pc = codigoPC(id);
+  enviados = [];
+  await emailEntrando('italo.fabricante@exemplo.com', `Re: Pedido de compra ${pc}`, BONIFICACAO);
+  assert.equal(enviados.length, 0, 'nada sai sem um humano escolher');
+  const [reg] = pendentesCora(id);
+  assert.ok(reg, 'a pendência existe');
+  assert.equal(reg.opcoes.length, 3);
+  assert.equal(reg.para, 'italo.fabricante@exemplo.com');
+  assert.equal(reg.assunto, `Re: Pedido de compra ${pc}`, 'não vira "Re: Re:"');
+  assert.equal(reg.via_ia, true);
+  // o texto do fornecedor vai cercado, e sem o nosso pedido citado embaixo
+  const prompt = chamadasIA.find(a => a.schemaName === 'cora_respostas').user;
+  assert.match(prompt, /<<<EMAIL_DO_FORNECEDOR>>>[\s\S]*2 trial[\s\S]*<<<FIM_EMAIL_DO_FORNECEDOR>>>/);
+  assert.doesNotMatch(prompt, /Segue nosso pedido/);
+  const linhas = atividades(id, 'fluxo').map(a => a.message).join('\n');
+  assert.match(linhas, /Cora leu a resposta do fornecedor/);
+  assert.match(linhas, /sem uma chave de licença reconhecível/);
+  assert.doesNotMatch(linhas, /devolveu a chave \(compras\) e a fatura/, 'a timeline não diz que veio chave');
+  assert.equal(docs.achar(id, 'FIN'), null, 'a palavra "pedido" citado não abre ciclo financeiro');
+  assert.ok(store.find('notifications', n => n.lead_id === id && n.type === 'fornecedor_pendente').length);
+  const r = await handle({ method: 'GET', path: '/api/leads/' + id, user: admin, headers: {}, query: {} });
+  assert.equal(r.body.data.lead.respostas_fornecedor.length, 1, 'o card mostra a pendência');
+});
+
+test('humano escolhe uma resposta: sai pela caixa da Cora, fica registrada, e não sai duas vezes', async () => {
+  respostaIA = TRES;
+  const id = await pedidoPago('teste-fluxo');
+  const pc = codigoPC(id);
+  await emailEntrando('italo.fabricante@exemplo.com', `Re: Pedido de compra ${pc}`, BONIFICACAO);
+  const [reg] = pendentesCora(id);
+  enviados = [];
+  const rota = `/api/leads/${id}/fornecedor/${reg.id}/responder`;
+  const r = await handle({ method: 'POST', path: rota, user: admin, headers: {}, query: {},
+    body: { indice: 1, texto: 'Aceitamos os 2 trials. Por favor, mande a chave agora.' } });
+  assert.equal(r.status, 200);
+  assert.equal(r.body.data.sent, true);
+  assert.equal(enviados.length, 1);
+  assert.equal(enviados[0].to, 'italo.fabricante@exemplo.com');
+  assert.equal(enviados[0].area, 'compras', 'responde como a Cora');
+  assert.equal(enviados[0].subject, `Re: Pedido de compra ${pc}`);
+  assert.match(enviados[0].html, /Aceitamos os 2 trials/, 'vai o texto editado');
+  assert.equal(store.get('respostas_fornecedor', reg.id).status, 'respondida');
+  assert.ok(atividades(id, 'email_out').some(a => /Aceitamos os 2 trials/.test(a.email_body)));
+  assert.match(atividades(id, 'fluxo').map(a => a.message).join('\n'), /Cora respondeu ao fornecedor .*"Aceitar com a chave"/);
+  const de_novo = await handle({ method: 'POST', path: rota, user: admin, headers: {}, query: {}, body: { indice: 0 } });
+  assert.equal(de_novo.status, 404);
+  assert.equal(enviados.length, 1);
+
+  // O fornecedor responde de novo, agora com a chave: o fluxo segue normalmente.
+  enviados = [];
+  await emailEntrando('italo.fabricante@exemplo.com', `Re: Pedido de compra ${pc}`, 'Combinado. Chave de licença: TRIAL-1234-ABCD');
+  assert.equal(docs.achar(id, 'PC').status, docs.FECHADO);
+  assert.equal(enviados.length, 2, 'Cora → Veridiana e Veridiana → cliente');
+  assert.equal(pendentesCora(id).length, 0);
+});
+
+test('Cora: resposta nova do fornecedor substitui as opções velhas; a chave encerra as que sobraram', async () => {
+  respostaIA = TRES;
+  const id = await pedidoPago('teste-fluxo');
+  const pc = codigoPC(id);
+  await emailEntrando('italo.fabricante@exemplo.com', `Re: ${pc}`, 'Posso mandar a versão 2025?');
+  await emailEntrando('italo.fabricante@exemplo.com', `Re: ${pc}`, 'Ou prefere a 2026?');
+  assert.equal(pendentesCora(id).length, 1, 'uma pendência por pedido de compra');
+  assert.equal(store.find('respostas_fornecedor', r => r.lead_id === id && r.status === 'substituida').length, 1);
+  await emailEntrando('italo.fabricante@exemplo.com', `Re: ${pc}`, 'Chave de licença: VERS-2026-XYZW');
+  assert.equal(pendentesCora(id).length, 0);
+  assert.equal(store.find('respostas_fornecedor', r => r.lead_id === id && r.status === 'resolvida').length, 1);
+});
+
+test('Cora sem IA: o humano recebe três respostas-padrão em vez de o pedido parar em silêncio', async () => {
+  respostaIA = null;
+  const id = await pedidoPago('teste-fluxo');
+  const pc = codigoPC(id);
+  await emailEntrando('italo.fabricante@exemplo.com', `Re: ${pc}`, 'Tem como esperar uma semana?');
+  const [reg] = pendentesCora(id);
+  assert.equal(reg.via_ia, false);
+  assert.equal(reg.opcoes.length, 3);
+  assert.ok(reg.opcoes.every(o => o.body.includes(pc) && /Chave de licença/.test(o.body)));
+});
+
+test('Cora: só Admin/Compras responde; modo teste não deixa sair para fora da lista; descartar registra', async () => {
+  respostaIA = TRES;
+  const id = await pedidoPago('teste-fluxo');
+  const pc = codigoPC(id);
+  await emailEntrando('italo.fabricante@exemplo.com', `Re: ${pc}`, BONIFICACAO);
+  const [reg] = pendentesCora(id);
+  const base = `/api/leads/${id}/fornecedor/${reg.id}/`;
+  const proibido = await handle({ method: 'POST', path: base + 'responder', user: vendedor, headers: {}, query: {}, body: { indice: 0 } });
+  assert.equal(proibido.status, 403);
+
+  // A lista do modo teste muda depois de a pendência nascer: o envio é barrado, nada muda.
+  const antes = process.env.FLUXO_EMAIL_PERMITIDOS;
+  process.env.FLUXO_EMAIL_PERMITIDOS = 'cliente.teste@exemplo.com';
+  enviados = [];
+  const barrado = await handle({ method: 'POST', path: base + 'responder', user: admin, headers: {}, query: {}, body: { indice: 0 } });
+  process.env.FLUXO_EMAIL_PERMITIDOS = antes;
+  assert.equal(barrado.status, 409);
+  assert.equal(enviados.length, 0);
+  assert.equal(store.get('respostas_fornecedor', reg.id).status, 'pendente');
+
+  const d = await handle({ method: 'POST', path: base + 'descartar', user: admin, headers: {}, query: {}, body: {} });
+  assert.equal(d.status, 200);
+  assert.equal(store.get('respostas_fornecedor', reg.id).status, 'descartada');
+  assert.match(atividades(id, 'fluxo').map(a => a.message).join('\n'), /descartadas por/);
+});
+
+test('Cora: provedor recusa o envio — a pendência continua para tentar de novo', async () => {
+  respostaIA = TRES;
+  const id = await pedidoPago('teste-fluxo');
+  await emailEntrando('italo.fabricante@exemplo.com', `Re: ${codigoPC(id)}`, BONIFICACAO);
+  const [reg] = pendentesCora(id);
+  respostaDoProvedor = () => ({ sent: false, reason: 'caixa indisponível' });
+  const r = await handle({ method: 'POST', path: `/api/leads/${id}/fornecedor/${reg.id}/responder`, user: admin, headers: {}, query: {}, body: { indice: 0 } });
+  assert.equal(r.body.data.send_failed, 'caixa indisponível');
+  assert.equal(store.get('respostas_fornecedor', reg.id).status, 'pendente');
 });

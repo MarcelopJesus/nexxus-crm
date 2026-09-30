@@ -163,7 +163,7 @@ function APP_TEMPLATE() { return `
             <div v-for="l in (leadsByStage[s.key]||[])" :key="l.id" class="lead-card" :draggable="!s.fechamento"
                  @dragstart="onDragStart(l)" @click="openLead(l.id)">
               <div class="lc-title">{{ l.title }} <span v-if="l.hot" class="hot-flag">🔥</span>
-                <span v-if="l.email_pending_options && l.email_pending_options.length" title="Resposta de negociação aguardando você escolher">✉️</span></div>
+                <span v-if="l.email_pending_options && l.email_pending_options.length" title="Resposta de negociação aguardando você escolher">✉️</span><span v-if="l.respostas_fornecedor && l.respostas_fornecedor.length" title="O fornecedor respondeu sem a chave — a Cora aguarda sua escolha">📦✉️</span></div>
               <div v-if="l.bant_score!=null" class="small" style="margin:2px 0"><span class="badge" :style="{background: tierColor(l.bant_tier), color:'#fff', fontSize:'10px'}">BANT {{ l.bant_score }} · {{ l.bant_tier }}</span></div>
               <div class="lc-acc">{{ l.account_name || '—' }}</div>
               <!-- O código do pedido (09/09): é ele que viaja até o assunto do e-mail e
@@ -550,6 +550,7 @@ function DRAWER_TEMPLATE() { return `
           <div class="muted small">{{ S.drawer.lead.account_name }} · {{ S.drawer.lead.contact_name }} · {{ S.drawer.lead.contact_email }}</div>
           <!-- E-mails do fluxo pós-pagamento que ficaram como rascunho. No cabeçalho, e não
                numa aba, porque pedido ganho abre direto na Timeline. -->
+          <div v-if="(S.drawer.lead.respostas_fornecedor||[]).length" class="small" style="margin-top:8px;color:#B25000;font-weight:600;cursor:pointer" @click="S.drawerTab='timeline'">✉️ O fornecedor respondeu sem a chave — a Cora preparou respostas na Timeline.</div>
           <div v-if="S.drawer.lead.fluxo_rascunhos && canArea('admin')" class="flex gap wrap" style="margin-top:8px;align-items:center">
             <button class="btn btn-sm" @click="reenviarFluxo" title="Depois de corrigir o motivo (e-mail do fornecedor, book, modo do fluxo), manda de novo o que ficou como rascunho.">✉️ Reenviar e-mails do fluxo ({{ S.drawer.lead.fluxo_rascunhos }})</button>
             <span class="small muted">O motivo de cada um está na Timeline.</span>
@@ -866,6 +867,30 @@ function DRAWER_TEMPLATE() { return `
 
       <!-- TIMELINE -->
       <div v-if="S.drawerTab==='timeline'">
+        <!-- Cora (30/09): o fornecedor respondeu sem a chave. Três respostas prontas; um
+             humano escolhe, pode editar, e ela sai pela caixa da Cora no Outlook. -->
+        <div v-for="reg in (S.drawer.lead.respostas_fornecedor||[])" :key="'cora'+reg.id" class="card card-p mb" style="border-color:#FF9500;border-left:4px solid #FF9500">
+          <div class="flex between center wrap gap">
+            <div class="section-title" style="margin:0">✉️ Cora aguarda sua escolha — {{ reg.pc_codigo }}</div>
+            <span class="muted small">{{ fmtDT(reg.created_at) }}</span>
+          </div>
+          <p class="small" style="margin:6px 0 4px">{{ reg.resumo }}</p>
+          <p class="small muted" style="margin:0 0 12px">Vai para {{ reg.para }} · assunto “{{ reg.assunto }}”<span v-if="!reg.via_ia"> · respostas-padrão (a IA não respondeu)</span></p>
+          <div v-for="(o,i) in reg.opcoes" :key="i" class="card card-p mb" style="cursor:pointer"
+               :style="{borderColor: (S.coraSel[reg.id]&&S.coraSel[reg.id].indice===i) ? 'var(--nx-primary)' : 'var(--nx-border)', background: (S.coraSel[reg.id]&&S.coraSel[reg.id].indice===i) ? 'rgba(0,113,227,.04)' : ''}"
+               @click="escolherCora(reg,i)">
+            <b class="small">{{ i+1 }}. {{ o.titulo }}</b>
+            <div class="small muted" style="white-space:pre-wrap;margin-top:6px">{{ o.body }}</div>
+          </div>
+          <div v-if="S.coraSel[reg.id]" class="field"><label>Texto que vai ao fornecedor (edite se quiser)</label>
+            <textarea v-model="S.coraSel[reg.id].texto" rows="7"></textarea></div>
+          <div class="flex gap wrap" v-if="canArea('compras')">
+            <button class="btn" @click="enviarCora(reg)" :disabled="!S.coraSel[reg.id]||S.coraEnviando===reg.id">
+              {{ S.coraEnviando===reg.id ? 'Enviando…' : 'Cora, envie esta resposta' }}</button>
+            <button class="btn btn-ghost" @click="descartarCora(reg)">Descartar</button>
+          </div>
+          <p v-else class="small muted">Só Admin ou Compras aprova a resposta ao fornecedor.</p>
+        </div>
         <div class="card card-p"><div class="section-title">Histórico</div>
           <div class="timeline">
             <div v-for="a in timelineItems" :key="a.id" class="tl-item">
