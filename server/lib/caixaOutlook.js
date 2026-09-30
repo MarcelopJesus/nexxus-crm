@@ -77,6 +77,9 @@ function paraEvento(msg, caixa) {
       text: msg.body && msg.body.contentType === 'text' ? msg.body.content : '',
       html: msg.body && msg.body.contentType !== 'text' ? msg.body.content : '',
       headers: msg.internetMessageHeaders || [],
+      // Para o CRM poder ENCAMINHAR esta mensagem depois (fatura com anexo → financeiro).
+      graph_id: msg.id || null,
+      anexos: !!msg.hasAttachments,
     },
   };
 }
@@ -111,7 +114,7 @@ async function varrer(api) {
       $filter: `receivedDateTime ge ${inicioDe(caixa)}`,
       $orderby: 'receivedDateTime asc',
       $top: String(POR_PAGINA),
-      $select: 'id,subject,from,body,internetMessageHeaders,internetMessageId,categories,receivedDateTime',
+      $select: 'id,subject,from,body,internetMessageHeaders,internetMessageId,categories,receivedDateTime,hasAttachments',
     });
     let url = `${base}/mailFolders/inbox/messages?${q}`;
     let marcador = null;      // até onde está tudo resolvido, na ordem

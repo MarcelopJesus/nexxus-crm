@@ -4,7 +4,7 @@ const store = require('./store');
 const { verifyPassword, sign, hashPassword } = require('./auth');
 const { getUsdBrl } = require('./fx');
 const { calculatePricing } = require('./pricing');
-const { sendEmail, isConfigured } = require('./mailer');
+const { sendEmail, isConfigured, caixasConfiguradas, encaminharPorGraph } = require('./mailer');
 const { ehCaixaPropria, caixasProprias } = require('./caixasProprias');
 const sdr = require('./sdr');
 const catalog = require('./catalogSync');
@@ -459,6 +459,44 @@ async function aguardarDespachosDoFluxo() {
   while (despachosDoFluxo.size) await Promise.all([...despachosDoFluxo]);
 }
 
+// A fatura chegou na caixa da Cora (o fornecedor mandou tudo junto, na mesma conversa) e
+// não na do Fred: a Cora encaminha ao financeiro com o anexo, pelo "Encaminhar" do Outlook.
+// Ensaio de 30/09: a invoice ficou parada na caixa de compras e o financeiro nem soube.
+// Chegou direto na caixa do financeiro? Já está onde deve — nada a fazer.
+function encaminharFaturaAoFinanceiro(leadId, pc, d, assunto) {
+  const caixa = (Array.isArray(d.to) ? d.to[0] : d.to) || '';
+  const fin = caixasConfiguradas().financeiro;
+  const fred = fin && fin.propria ? String(fin.endereco).replace(/.*<(.+)>.*/, '$1').trim().toLowerCase() : null;
+  if (!fred) {
+    log(leadId, null, 'fluxo', `[compras] A fatura de ${pc.codigo} chegou em compras, mas a caixa do financeiro não está configurada — encaminhe à mão.`);
+    notify('fluxo_falha_envio', `${pc.codigo}: fatura recebida em compras e sem caixa do financeiro para encaminhar.`, leadId);
+    return null;
+  }
+  if (String(caixa).toLowerCase() === fred) return null;
+  const porque = !d.graph_id ? 'o e-mail não veio pelo Outlook (sem id para encaminhar)' : fluxo.motivoParaNaoEnviar(fred);
+  if (porque) {
+    log(leadId, null, 'fluxo', `[compras] Fatura de ${pc.codigo} NÃO encaminhada ao financeiro — ${porque}. Encaminhe à mão da caixa de compras.`);
+    notify('fluxo_falha_envio', `${pc.codigo}: fatura não foi encaminhada ao financeiro (${porque}).`, leadId);
+    return null;
+  }
+  const comentario = `Fred,\n\nO fornecedor mandou a fatura do pedido ${pc.codigo} para compras. Encaminho para o financeiro${d.anexos ? ' — o anexo segue abaixo' : ''}.\n\nCora — Compras`;
+  const p = encaminharPorGraph({ caixa, messageId:d.graph_id, para:fred, comentario })
+    .then(r => {
+      if (r && r.sent) {
+        log(leadId, null, 'email_out', `Para ${fred} — Enc: ${assunto}\n${comentario}`);
+        log(leadId, null, 'fluxo', `[compras] Cora encaminhou a fatura de ${pc.codigo} ao financeiro (${fred})${d.anexos ? ', com o anexo' : ''}.`);
+      } else {
+        const motivo = (r && (r.reason || r.status)) || 'sem resposta do Outlook';
+        log(leadId, null, 'fluxo', `[compras] Fatura de ${pc.codigo} NÃO encaminhada ao financeiro — ${motivo}. Encaminhe à mão.`);
+        notify('fluxo_falha_envio', `${pc.codigo}: a Cora não conseguiu encaminhar a fatura ao financeiro (${motivo}).`, leadId);
+      }
+    })
+    .catch(e => notify('fluxo_falha_envio', `${pc.codigo}: falha ao encaminhar a fatura ao financeiro (${e.message}).`, leadId))
+    .finally(() => despachosDoFluxo.delete(p));
+  despachosDoFluxo.add(p);
+  return p;
+}
+
 // Resposta do fornecedor sem a chave: a Cora lê e prepara três respostas (coraRespostas.js).
 // A IA leva segundos — não segura a leitura da caixa; entra na mesma lista de espera.
 function sugerirRespostaAoFornecedor(leadId, ctx) {
@@ -818,6 +856,7 @@ async function processarEmailRecebido(body, req, opts = {}) {
       despacharFluxo(leadId, r.envios);
       if (r.ok && r.pc) cora.encerrarPorChave(leadId, r.pc.codigo);
       if (r.pedirResposta) sugerirRespostaAoFornecedor(leadId, { pc:r.pc, from, assunto, texto:r.texto, problemas:r.problemas });
+      if (r.fatura && r.pc) encaminharFaturaAoFinanceiro(leadId, r.pc, d, assunto);
       return { status:200, body:{ success:true, data:{ lead_id:leadId, fornecedor:true,
         conferido:r.ok, problemas:r.problemas || null } } };
     }
