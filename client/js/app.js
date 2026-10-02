@@ -32,7 +32,7 @@ const app = createApp({
     const S = reactive({
       user: null, ready: false,
       // login
-      email: 'joao@nexxustech.one', password: 'senha123', loginErr: '', loggingIn: false,
+      email: '', password: '', loginErr: '', loggingIn: false,
       // data
       meta: { stages: [], areas: [], users: [] },
       chatSessions: [],
@@ -50,7 +50,8 @@ const app = createApp({
       propInput: { final_price:'', approve_below_floor:false }, closeForm:{ result:'', lost_reason:'' },
       noteInput: '', savingPrice:false,
       newSupplier:{ name:'', country:'', currency:'USD', email:'' }, newProduct:{ supplier_id:'', name:'', sku:'', list_cost_usd:'' },
-      newUser:{ name:'', email:'', password:'senha123', area:'vendas', role:'user' },
+      newUser:{ name:'', email:'', password:'', area:'vendas', role:'user' },
+      minhaSenha:{ current:'', password:'', confirm:'' },
       // SDR Agent
       sdr: { configured:false, model:'', agent_enabled:false, agent_off_reason:null },
       // BDR — fila de decisões que o agente Nexus não resolveu sozinho
@@ -577,7 +578,26 @@ const app = createApp({
     async function saveSupplierEmail(s){ const r=await API.patch('/api/suppliers/'+s.id, { email:s.email||'' }); if(r.ok){ await loadCatalog(); flash('E-mail do fornecedor salvo.'); } else flash((r.data&&r.data.error&&r.data.error.message)||'Sem permissão.'); }
     async function saveProductBook(p){ const r=await API.patch('/api/products/'+p.id, { book_url:p.book_url||'' }); if(r.ok){ await loadCatalog(); flash('Link do book salvo.'); } else flash((r.data&&r.data.error&&r.data.error.message)||'Sem permissão.'); }
     async function addProduct(){ if(!S.newProduct.name)return; const r=await API.post('/api/products', S.newProduct); if(r.ok){ S.newProduct={supplier_id:'',name:'',sku:'',list_cost_usd:''}; await loadCatalog(); flash('Produto adicionado.'); } }
-    async function addUser(){ if(!S.newUser.name||!S.newUser.email)return; const r=await API.post('/api/users', S.newUser); if(r.ok){ S.newUser={name:'',email:'',password:'senha123',area:'vendas',role:'user'}; await loadUsers(); flash('Usuário criado.'); } else flash((r.data&&r.data.error&&r.data.error.message)||'Sem permissão.'); }
+    const erroApi = (r, padrao) => (r.data && r.data.error && r.data.error.message) || padrao;
+    async function setUserActive(u, ativo){
+      if (!ativo && !confirm('Desativar ' + u.name + '? A pessoa perde o acesso na hora.')) return;
+      const r = await API.patch('/api/users/' + u.id, { active: ativo });
+      if (r.ok) { await loadUsers(); flash(ativo ? 'Usuário reativado.' : 'Usuário desativado.'); } else flash(erroApi(r, 'Não foi possível alterar.'));
+    }
+    async function resetUserPassword(u){
+      const nova = prompt('Nova senha para ' + u.name + ' (mínimo 10 caracteres). Passe para a pessoa por um canal seguro e peça para ela trocar em seguida.');
+      if (!nova) return;
+      const r = await API.patch('/api/users/' + u.id, { password: nova });
+      flash(r.ok ? 'Senha redefinida. As sessões abertas dessa pessoa foram encerradas.' : erroApi(r, 'Não foi possível redefinir.'));
+    }
+    async function trocarMinhaSenha(){
+      const f = S.minhaSenha;
+      if (f.password !== f.confirm) { flash('A confirmação não bate com a nova senha.'); return; }
+      const r = await API.post('/api/auth/password', { current: f.current, password: f.password });
+      if (r.ok) { API.setToken(r.data.data.token); S.minhaSenha = { current:'', password:'', confirm:'' }; flash('Senha trocada.'); }
+      else flash(erroApi(r, 'Não foi possível trocar a senha.'));
+    }
+    async function addUser(){ if(!S.newUser.name||!S.newUser.email)return; const r=await API.post('/api/users', S.newUser); if(r.ok){ S.newUser={name:'',email:'',password:'',area:'vendas',role:'user'}; await loadUsers(); flash('Usuário criado.'); } else flash((r.data&&r.data.error&&r.data.error.message)||'Sem permissão.'); }
 
     // route-driven loads — a mesma função roda na troca de rota E no primeiro carregamento,
     // senão recarregar direto em #/faq (ou #/bdr etc.) mostra a tela vazia.
@@ -604,7 +624,7 @@ const app = createApp({
     return { S, route, go, stageLabel, colunasDoFunil, tramiteDoLead, totalDaColuna, podeSoltar, AREA_LABEL, BRL, PCT, initials, canArea, flash, fmtDT, fmtD,
       doLogin, logout, leadsByStage, onDragStart, onDrop, createLead, openLead, closeDrawer,
       triage, toggleHot, addNote, submitQuote, runPricing, savePricing, sendProposal, closeLead,
-      toggleTask, toggleTaskRow, updateContract, latestPricing, saveConfig, reenviarFluxo, escolherCora, enviarCora, descartarCora, addSupplier, saveSupplierEmail, saveProductBook, addProduct, addUser,
+      toggleTask, toggleTaskRow, updateContract, latestPricing, saveConfig, reenviarFluxo, escolherCora, enviarCora, descartarCora, addSupplier, saveSupplierEmail, saveProductBook, addProduct, addUser, setUserActive, resetUserPassword, trocarMinhaSenha,
       loadReport, loadTasks, loadUsers, filteredContacts,
       loadNotifications, markNotifRead, dispensarPopup, propLink, propStatusLabel, copyText, copyProposal, openProposal, sendPropEmail, isOverdue, isToday, srcColor, barPct,
       channelLabel, originBadge,

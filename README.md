@@ -55,7 +55,9 @@ Isso sobe tudo (API + frontend) em **http://localhost:3001**. Na primeira execu�
 
 > Não precisa de flags nem de `npm install`. O Vue é carregado de um CDN (com fallback automático), então mantenha internet ao abrir a página. Para uso 100% offline, veja o item 5.
 
-### Login demo
+### Login demo (só na máquina local)
+
+Estes usuários e a senha `senha123` existem só fora de produção. Com `NODE_ENV=production` (o Dockerfile define), o seed cria os usuários de exemplo com senha aleatória, e a tela de login não sugere nenhum acesso. Em produção cada pessoa tem o próprio login, criado por um admin em *Usuários*.
 
 | E-mail | Senha | Área |
 |---|---|---|
