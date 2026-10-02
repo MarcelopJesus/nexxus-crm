@@ -114,7 +114,7 @@ const server = http.createServer(async (req, res) => {
     // Webhook que não se identifica como JSON é chamada errada (ou sonda): recusa antes
     // de gastar HMAC e banco com ela. Só nas rotas de webhook — o /api/public/leads que
     // o site já usa em produção segue aceitando como está.
-    const WEBHOOKS = ['/api/public/email/inbound', '/api/webhooks/lead'];
+    const WEBHOOKS = ['/api/public/email/inbound', '/api/webhooks/lead', '/api/webhooks/asaas'];
     if (req.method === 'POST' && WEBHOOKS.includes(pathname)) {
       const ct = String(req.headers['content-type'] || '').toLowerCase();
       if (!ct.includes('application/json'))
