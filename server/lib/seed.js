@@ -5,7 +5,10 @@ const { hashPassword } = require('./auth');
 
 function seedIfEmpty() {
   if (!store.isEmpty()) return false;
-  const pw = hashPassword('senha123');
+  // Fora de produção (dev e testes) a senha de exemplo é conhecida. Em produção, se o seed rodar
+  // por acidente, os usuários de exemplo nascem com senha aleatória e não servem para entrar.
+  const pw = hashPassword(process.env.NODE_ENV === 'production'
+    ? require('crypto').randomBytes(24).toString('base64url') : 'senha123');
 
   const U = {};
   const users = [

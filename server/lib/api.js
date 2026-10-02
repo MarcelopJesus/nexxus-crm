@@ -1778,11 +1778,55 @@ async function handle(req) {
   if (method==='POST' && path==='/api/contacts') return { status:201, body:{ success:true, data: S.insert('contacts', { account_id:body.account_id||null, name:body.name, email:body.email||null, phone:body.phone||null, role_title:body.role_title||null }) } };
 
   // ---- Usuários ----
-  if (method==='GET' && path==='/api/users') return okList(S.all('users').sort(byName).map(u=>({ id:u.id, name:u.name, email:u.email, area:u.area, role:u.role, active:u.active })));
+  if (method==='GET' && path==='/api/users') {
+    if (!canArea(user,'admin')) return forbidden('Apenas Admin vê a lista de usuários.');
+    return okList(S.all('users').sort(byName).map(u=>({ id:u.id, name:u.name, email:u.email, area:u.area, role:u.role, active:u.active })));
+  }
   if (method==='POST' && path==='/api/users') {
     if (!canArea(user,'admin')) return forbidden('Apenas Admin cria usuários.');
-    const r = S.insert('users', { name:body.name, email:body.email, password_hash:hashPassword(body.password||'senha123'), area:body.area||'vendas', role:body.role||'user', active:1 });
-    return { status:201, body:{ success:true, data:{ id:r.id, name:r.name, email:r.email, area:r.area, role:r.role } } };
+    const name = String(body.name||'').trim();
+    const email = String(body.email||'').trim().toLowerCase();
+    if (!name || !EMAIL_RE.test(email)) return badRequest('Informe nome e um e-mail válido.');
+    const fraca = senhaFraca(body.password);
+    if (fraca) return badRequest(fraca);
+    if (S.findOne('users', u=>String(u.email).toLowerCase()===email)) return badRequest('Já existe usuário com este e-mail.');
+    const role = USER_ROLES.includes(body.role) ? body.role : 'user';
+    const r = S.insert('users', { name, email, password_hash:hashPassword(body.password), area:body.area||'vendas', role, active:1 });
+    return { status:201, body:{ success:true, data:{ id:r.id, name:r.name, email:r.email, area:r.area, role:r.role, active:r.active } } };
+  }
+  if (method==='PATCH' && (m = P(/^\/api\/users\/(\d+)$/))) {
+    if (!canArea(user,'admin')) return forbidden('Apenas Admin altera usuários.');
+    const alvo = S.get('users', m[1]);
+    if (!alvo) return { status:404, body:{ success:false, error:{ message:'Usuário não encontrado.' } } };
+    const patch = {};
+    if (body.name !== undefined) { const n = String(body.name).trim(); if (!n) return badRequest('Nome vazio.'); patch.name = n; }
+    if (body.area !== undefined) patch.area = String(body.area);
+    if (body.role !== undefined) { if (!USER_ROLES.includes(body.role)) return badRequest('Papel inválido.'); patch.role = body.role; }
+    if (body.active !== undefined) patch.active = body.active ? 1 : 0;
+    if (body.password !== undefined) {
+      const fraca = senhaFraca(body.password);
+      if (fraca) return badRequest(fraca);
+      patch.password_hash = hashPassword(body.password);
+    }
+    if (alvo.id === user.id && (patch.active === 0 || (patch.role && patch.role !== 'admin')))
+      return badRequest('Você não pode desativar nem tirar o admin de si mesmo.');
+    const viraAdmin = (patch.role || alvo.role) === 'admin' && (patch.active !== undefined ? patch.active : alvo.active);
+    const outrosAdmins = S.find('users', u=>u.id!==alvo.id && u.active && u.role==='admin').length;
+    if (alvo.role==='admin' && !viraAdmin && outrosAdmins===0) return badRequest('Precisa sobrar pelo menos um admin ativo.');
+    if (patch.active === 0 || patch.password_hash || patch.role) patch.sessoes_validas_desde = Date.now();
+    const r = S.update('users', alvo.id, patch);
+    return { status:200, body:{ success:true, data:{ id:r.id, name:r.name, email:r.email, area:r.area, role:r.role, active:r.active } } };
+  }
+  if (method==='POST' && path==='/api/auth/password') {
+    const eu = S.get('users', user.id);
+    if (!eu || !verifyPassword(String(body.current||''), eu.password_hash)) return badRequest('Senha atual incorreta.');
+    const fraca = senhaFraca(body.password);
+    if (fraca) return badRequest(fraca);
+    if (verifyPassword(String(body.password), eu.password_hash)) return badRequest('A nova senha precisa ser diferente da atual.');
+    const agora = Date.now();
+    S.update('users', eu.id, { password_hash:hashPassword(body.password), sessoes_validas_desde:agora });
+    // Token novo emitido depois do corte, para quem trocou continuar logado.
+    return { status:200, body:{ success:true, data:{ token: sign({ id:eu.id, email:eu.email, area:eu.area, role:eu.role }) } } };
   }
 
   // ---- Notificações internas ----
@@ -1823,6 +1867,14 @@ async function handle(req) {
   return { status:404, body:{ success:false, error:{ message:'Rota não encontrada: '+method+' '+path } } };
 }
 
+const USER_ROLES = ['user', 'manager', 'admin'];
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+function senhaFraca(p) {
+  p = String(p || '');
+  if (p.length < 10) return 'A senha precisa ter pelo menos 10 caracteres.';
+  if (/^senha|123456|nexxus/i.test(p)) return 'Senha fácil demais. Use uma frase ou uma senha gerada.';
+  return null;
+}
 function publicUser(u){ return { id:u.id, name:u.name, email:u.email, area:u.area, role:u.role }; }
 function canArea(user, area){ return user.role==='admin' || user.area==='admin' || user.area===area; }
 function forbidden(msg){ return { status:403, body:{ success:false, error:{ message:msg } } }; }

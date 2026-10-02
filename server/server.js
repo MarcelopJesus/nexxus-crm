@@ -5,6 +5,7 @@ const fs = require('fs');
 const path = require('path');
 const url = require('url');
 const { verify } = require('./lib/auth');
+const { usuarioDoToken } = require('./lib/sessao');
 const { seedIfEmpty } = require('./lib/seed');
 const { handle } = require('./lib/api');
 const catalog = require('./lib/catalogSync');
@@ -97,7 +98,7 @@ const server = http.createServer(async (req, res) => {
   try {
     const auth = req.headers['authorization'] || '';
     const token = auth.startsWith('Bearer ') ? auth.slice(7) : null;
-    const user = token ? verify(token) : null;
+    const user = usuarioDoToken(token);
     const publica = pathname.startsWith('/api/public/') || pathname.startsWith('/api/webhooks/');
     const lido = ['POST','PUT','PATCH','DELETE'].includes(req.method)
       ? await readBody(req, publica ? LIMITE_PUBLICO : LIMITE_INTERNO)
@@ -172,7 +173,6 @@ function outlookSeguro() {
 const HOST = process.env.HOST || '0.0.0.0';
 ready.then(() => server.listen(PORT, HOST, () => {
   console.log(`\n  Nexxus CRM rodando em http://localhost:${PORT}`);
-  console.log(`  Login demo: joao@nexxustech.one / senha123\n`);
   if (catalog.isConfigured()) {
     syncCatalogoSeguro();
     setInterval(syncCatalogoSeguro, SYNC_MS).unref();

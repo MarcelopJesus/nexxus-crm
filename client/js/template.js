@@ -25,7 +25,6 @@ function APP_TEMPLATE() { return `
         <div class="field"><label>Senha</label><input v-model="S.password" type="password" autocomplete="current-password" placeholder="••••••••"/></div>
         <button class="btn btn-block" :disabled="S.loggingIn">{{ S.loggingIn ? 'Entrando…' : 'Entrar' }}</button>
       </form>
-      <p class="small muted mt">Demo: <b>joao@nexxustech.one</b> / senha123 · também: carla (compras), felipe (financeiro), gabriela (jurídico)…</p>
     </div>
   </div>
 </div>
@@ -495,15 +494,30 @@ function APP_TEMPLATE() { return `
       <!-- ===== USUÁRIOS ===== -->
       <div v-else-if="route==='/usuarios'">
         <div class="card mb">
-          <table class="tbl"><thead><tr><th>Nome</th><th>E-mail</th><th>Área</th><th>Papel</th></tr></thead>
-          <tbody><tr v-for="u in S.users" :key="u.id"><td>{{ u.name }}</td><td class="muted">{{ u.email }}</td><td><span class="chip">{{ AREA_LABEL[u.area]||u.area }}</span></td><td>{{ u.role }}</td></tr></tbody></table>
+          <table class="tbl"><thead><tr><th>Nome</th><th>E-mail</th><th>Área</th><th>Papel</th><th>Situação</th><th v-if="canArea('admin')"></th></tr></thead>
+          <tbody><tr v-for="u in S.users" :key="u.id" :style="u.active ? '' : 'opacity:.55'"><td>{{ u.name }}</td><td class="muted">{{ u.email }}</td><td><span class="chip">{{ AREA_LABEL[u.area]||u.area }}</span></td><td>{{ u.role }}</td>
+            <td>{{ u.active ? 'Ativo' : 'Desativado' }}</td>
+            <td v-if="canArea('admin')" style="white-space:nowrap">
+              <button class="btn btn-ghost btn-sm" @click="resetUserPassword(u)">Redefinir senha</button>
+              <button v-if="u.active && u.id!==S.user.id" class="btn btn-ghost btn-sm" @click="setUserActive(u,false)">Desativar</button>
+              <button v-if="!u.active" class="btn btn-ghost btn-sm" @click="setUserActive(u,true)">Reativar</button>
+            </td></tr></tbody></table>
+        </div>
+        <div class="card card-p mb">
+          <div class="section-title">Minha senha</div>
+          <div class="row3">
+            <div class="field"><label>Senha atual</label><input v-model="S.minhaSenha.current" type="password" autocomplete="current-password"/></div>
+            <div class="field"><label>Nova senha (mín. 10)</label><input v-model="S.minhaSenha.password" type="password" autocomplete="new-password"/></div>
+            <div class="field"><label>Repita a nova senha</label><input v-model="S.minhaSenha.confirm" type="password" autocomplete="new-password"/></div>
+          </div>
+          <button class="btn" @click="trocarMinhaSenha">Trocar minha senha</button>
         </div>
         <div class="card card-p" v-if="canArea('admin')">
           <div class="section-title">Novo usuário</div>
           <div class="row3">
             <div class="field"><label>Nome</label><input v-model="S.newUser.name"/></div>
             <div class="field"><label>E-mail</label><input v-model="S.newUser.email"/></div>
-            <div class="field"><label>Senha</label><input v-model="S.newUser.password"/></div>
+            <div class="field"><label>Senha inicial (mín. 10)</label><input v-model="S.newUser.password" type="password" autocomplete="new-password"/></div>
           </div>
           <div class="row3">
             <div class="field"><label>Área</label><select v-model="S.newUser.area"><option v-for="a in S.meta.areas" :value="a">{{ AREA_LABEL[a]||a }}</option></select></div>
