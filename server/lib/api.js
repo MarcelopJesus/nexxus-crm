@@ -13,6 +13,8 @@ const docnum = require('./docnum');
 const documentos = require('./documentos');
 const fluxo = require('./fluxoPedido');
 const cora = require('./coraRespostas');
+const cobranca = require('./cobranca');
+const asaas = require('./asaas');
 const S = store; // alias
 
 const STAGES = [
@@ -508,6 +510,28 @@ function sugerirRespostaAoFornecedor(leadId, ctx) {
     .finally(() => despachosDoFluxo.delete(p));
   despachosDoFluxo.add(p);
   return p;
+}
+
+// M51 — boleto do Asaas no aceite da proposta. O cliente espera a página responder: a
+// chamada ao Asaas (e o e-mail da Veridiana) corre por fora, na mesma lista de espera.
+function gerarBoleto(leadId, prop) {
+  const deps = { log, notify, enviar: sendEmail,
+    logEmailOut: (id, to, assunto, corpo, messageId) => logEmailOut(id, null, to, assunto, corpo, messageId) };
+  const p = cobranca.gerarNoAceite(deps, leadId, prop)
+    .catch(e => notify('cobranca_falha', `Falha ao gerar o boleto: ${e.message}`, leadId))
+    .finally(() => despachosDoFluxo.delete(p));
+  despachosDoFluxo.add(p);
+  return p;
+}
+// Boleto pago = o mesmo ponto de entrada do pedido pago no site: abre PV e PC e começa
+// as 7 etapas. aoConfirmarPagamento é idempotente — aviso repetido não duplica nada.
+function confirmarPagamentoB2B(leadId) {
+  const andamento = fluxo.aoConfirmarPagamento({ log, notify }, leadId);
+  if (andamento.repetido) return andamento;
+  despacharFluxo(leadId, andamento.envios);
+  const pvs = andamento.pvs || (andamento.pv ? [andamento.pv] : []);
+  if (pvs.length) log(leadId, null, 'doc', 'Pedido(s) de venda '+pvs.map(d => d.codigo).join(', ')+' aberto(s) — boleto pago.');
+  return andamento;
 }
 
 // M28 — "e-mail in" com resumo da IA. O evento na timeline precisa dizer O QUE o cliente
@@ -1096,6 +1120,10 @@ async function handle(req) {
     // sempre pelo preço da proposta aceita — foi por ele que o negócio fechou.
     closeWon(prop.lead_id, null, { value: prop.final_price, setValue: true,
       message: `Negócio GANHO — cliente aceitou a proposta v${prop.version} na página pública. Gatilho enviado ao Jurídico.` });
+    // Pedido do site já chega pago; só a proposta B2B precisa de boleto. Reaceite não gera
+    // outro (gerarNoAceite procura a cobrança da proposta antes).
+    const leadAceito = S.get('leads', prop.lead_id);
+    if (leadAceito && leadAceito.source !== 'checkout') gerarBoleto(prop.lead_id, S.get('proposals', prop.id));
     return { status:200, body:{ success:true } };
   }
   // Recusa do cliente: registra o não, mas quem decide marcar o lead como perdido é gente.
@@ -1121,6 +1149,25 @@ async function handle(req) {
   }
   // ======================================================================
 
+  // M51 — aviso do Asaas. Fora da autenticação do CRM: quem prova a origem é o token que
+  // cadastramos no painel do Asaas. Resposta 200 sempre que o token confere — evento que
+  // não é nosso é ignorado, porque erro repetido faz o Asaas pausar a fila inteira.
+  if (path==='/api/webhooks/asaas' && method==='POST') {
+    const h = req.headers || {};
+    if (!asaas.tokenWebhookValido(h['asaas-access-token'])) return { status:401, body:{ success:false, error:{ message:'Token inválido.' } } };
+    const eventoId = 'asaas:' + String(body.id || (body.event + ':' + (body.payment && body.payment.id)));
+    const reserva = reservarEvento(eventoId, 'asaas');
+    if (reserva.duplicado) return { status:200, body:{ success:true, duplicado:true } };
+    try {
+      const r = cobranca.aoReceberWebhook({ log, notify, confirmarPagamento: confirmarPagamentoB2B }, body);
+      fecharEvento(eventoId);
+      return { status:200, body:{ success:true, data:r } };
+    } catch (e) {
+      liberarEvento(eventoId);
+      console.error('[asaas] falha ao tratar aviso:', e.message);
+      return { status:500, body:{ success:false, error:{ message:e.message } } };
+    }
+  }
   if (!user) return { status:401, body:{ success:false, error:{ message:'Não autenticado.' } } };
 
   if (method === 'GET' && path === '/api/auth/me') {
@@ -1210,6 +1257,20 @@ async function handle(req) {
   if ((m=P(/^\/api\/leads\/(\d+)\/hot$/)) && method==='POST') {
     const id=+m[1]; const l=S.get('leads', id); const nv=l.hot?0:1; S.update('leads', id, { hot:nv });
     return { status:200, body:{ success:true, data:{ hot:nv } } };
+  }
+  // Gerar (ou refazer) o boleto à mão: CNPJ cadastrado depois do aceite, ou Asaas fora do
+  // ar na hora. Usa a última proposta aceita do lead.
+  if ((m=P(/^\/api\/leads\/(\d+)\/cobranca$/)) && method==='POST') {
+    const leadId = Number(m[1]);
+    if (!S.get('leads', leadId)) return notfound();
+    const prop = S.find('proposals', p => p.lead_id===leadId && p.status==='accepted').sort((a,b)=>b.version-a.version)[0];
+    if (!prop) return { status:409, body:{ success:false, error:{ message:'Este lead não tem proposta aceita.' } } };
+    const r = await gerarBoleto(leadId, prop);
+    const cob = cobranca.daProposta(prop.id);
+    return { status: cob && cob.status==='pendente' ? 200 : 422, body:{ success: !!(cob && cob.status==='pendente'), data:cob } };
+  }
+  if ((m=P(/^\/api\/leads\/(\d+)\/cobrancas$/)) && method==='GET') {
+    return { status:200, body:{ success:true, data: S.find('cobrancas', c => c.lead_id===Number(m[1])).sort((a,b)=>b.id-a.id) } };
   }
   if ((m=P(/^\/api\/leads\/(\d+)\/close$/)) && method==='POST') {
     const id=+m[1]; const result=body.result;
@@ -1975,7 +2036,7 @@ function podaWebhookEvents() {
 //   'processing' há > 2 min    -> a tentativa anterior morreu (processo caiu): reprocessa
 //   'done'                     -> duplicado de verdade
 const PROCESSANDO_MS = 2 * 60 * 1000;
-function reservarEvento(eventId) {
+function reservarEvento(eventId, origem) {
   const atual = S.findOne('webhook_events', e => e.event_id === eventId);
   if (atual) {
     if (atual.status === 'done') return { duplicado:true };
@@ -1984,7 +2045,7 @@ function reservarEvento(eventId) {
     S.update('webhook_events', atual.id, { status:'processing', started_at:S.now(), retomado:1 });
     return { duplicado:false, id:atual.id };
   }
-  const novo = S.insert('webhook_events', { event_id:eventId, source:'resend_inbound',
+  const novo = S.insert('webhook_events', { event_id:eventId, source:origem||'resend_inbound',
     status:'processing', started_at:S.now() });
   return { duplicado:false, id:novo.id };
 }
